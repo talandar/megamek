@@ -489,6 +489,14 @@ tasks.register('filteredUnitListTool', JavaExec) {
     mainClass = 'megamek.utilities.FilteredUnitListTool'
 }
 
+tasks.register('simpleCSVExport', JavaExec) {
+    dependsOn jar
+    description = 'Filter Unit List Tool'
+    group = 'utility'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'megamek.utilities.SimplifiedCSVExportTool'
+}
+
 tasks.register('gifWriter', JavaExec) {
     dependsOn jar
     description = 'Generate a GIF from a game summary'
