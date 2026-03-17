@@ -29,6 +29,7 @@ import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -54,10 +55,20 @@ public final class SimplifiedCSVExportTool {
     private static final String DELIM = "|";
     private static boolean includeGunEmplacement = false; // Variable to control inclusion of Gun Emplacement units
 
+    private static final Set<String> heatSinkNames = Set.of(
+          "CLDoubleHeatSink",
+          "ISDoubleHeatSinkPrototype",
+          "2 Compact  Heat Sinks",
+          "ISDoubleHeatSink",
+          "Heat Sink",
+          "Laser Heat Sink",
+          "1 Compact Heat Sink");
+
     private static final String NOT_APPLICABLE = "Not Applicable";
 
     private static final List<String> HEADERS = List.of("Chassis", "Model", "MUL ID", "Combined", "Clan",
-            "Weight", "Intro Date", "Unit Type", "BV", "Rules", "Equipment", "Armor", "Structure", "Movement");
+            "Weight", "Intro Date", "Unit Type", "BV", "Rules", "Equipment", "Armor", "Structure", "Movement", "Heat " +
+                                                                                                                     "Sunk");
 
     public static void main(String... args) {
         if (args.length > 0) {
@@ -72,6 +83,9 @@ public final class SimplifiedCSVExportTool {
             StringBuilder csvLine = new StringBuilder();
             csvLine.append(String.join(DELIM, HEADERS)).append("\n");
             bw.write(csvLine.toString());
+
+            //DEBUG
+            Set<String> sinkTypes = new HashSet<>();
 
             for (MekSummary unit : units) {
                 if (!includeGunEmplacement && unit.getUnitType().equals("Gun Emplacement")) {
@@ -100,7 +114,34 @@ public final class SimplifiedCSVExportTool {
 
                 // Equipment Names
                 List<String> equipmentNames = new ArrayList<>();
-                for (String name : unit.getEquipmentNames()) {
+
+                int sinkValue = 0;
+
+                for(int equipIndex = 0; equipIndex< unit.getEquipmentNames().size();equipIndex++) {
+                    String name = unit.getEquipmentNames().get(equipIndex);
+
+                    int equipCount = unit.getEquipmentQuantities().get(equipIndex);
+                    if (name.equals("CLDoubleHeatSink")) {
+                        sinkValue += 2 * equipCount;
+                    } else if (name.equals("ISDoubleHeatSinkPrototype")) {
+                        sinkValue += 2 * equipCount;
+                    } else if (name.equals("2 Compact Heat Sinks")) {
+                        sinkValue += 2 * equipCount;
+                    } else if (name.equals("ISDoubleHeatSink")) {
+                        sinkValue += 2 * equipCount;
+                    } else if (name.equals("Heat Sink")) {
+                        sinkValue += equipCount;
+                    } else if (name.equals("Laser Heat Sink")) {
+                        sinkValue += 2 * equipCount;
+                    } else if (name.equals("1 Compact Heat Sink")) {
+                        sinkValue += equipCount;
+                    }
+
+                    // Ignore Heat Sinks
+                    if(heatSinkNames.contains(name)){
+                        continue;
+                    }
+
                     // Ignore armor critical
                     if (ArmorType.allArmorNames().contains(name)) {
                         continue;
@@ -111,8 +152,14 @@ public final class SimplifiedCSVExportTool {
                         continue;
                     }
 
-                    if (Stream.of("Bay", "Ammo", "Infantry Auto Rifle", "Heat Sink", "HeatSink", "Ferro-Fibrous", Infantry.LEG_ATTACK,
-                                Infantry.SWARM_MEK, Infantry.SWARM_WEAPON_MEK, Infantry.STOP_SWARM)
+                    if (Stream.of("Bay",
+                                "Ammo",
+                                "Infantry Auto Rifle",
+                                "Ferro-Fibrous",
+                                Infantry.LEG_ATTACK,
+                                Infantry.SWARM_MEK,
+                                Infantry.SWARM_WEAPON_MEK,
+                                Infantry.STOP_SWARM)
                               .anyMatch(name::contains)) {
                         continue;
                     }
@@ -125,9 +172,14 @@ public final class SimplifiedCSVExportTool {
                 //STRUCTURE
                 csvLine.append(unit.getTotalInternal()).append(DELIM);
 
-                String movement = unit.getWalkMp()+"/"+unit.getRunMp()+"/"+(unit.getJumpMp()<=0? "-": unit.getJumpMp());
+                String movement = unit.getWalkMp() +
+                                        "/" +
+                                        unit.getRunMp() +
+                                        "/" +
+                                        (unit.getJumpMp() <= 0 ? "-" : unit.getJumpMp());
                 csvLine.append(movement).append(DELIM);
 
+                csvLine.append(sinkValue).append(DELIM);
 
 
                 csvLine.append("\n");
