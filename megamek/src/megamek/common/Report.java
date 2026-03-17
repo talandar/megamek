@@ -1,28 +1,44 @@
 /*
- * MegaMek - Copyright (C) 2000-2005 Ben Mazur (bmazur@sev.org)
- * Copyright (c) 2023 - The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2000-2005 Ben Mazur (bmazur@sev.org)
+ * Copyright (C) 2005-2025 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
  * MegaMek is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
  *
  * MegaMek is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with MegaMek. If not, see <http://www.gnu.org/licenses/>.
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
+
 package megamek.common;
 
 import static megamek.client.ui.util.UIUtil.uiGray;
 
 import java.awt.Color;
 import java.awt.Font;
+import java.io.Serial;
 import java.util.Hashtable;
 import java.util.Vector;
 import java.util.regex.Matcher;
@@ -34,6 +50,10 @@ import javax.swing.text.html.StyleSheet;
 import megamek.client.ui.clientGUI.GUIPreferences;
 import megamek.client.ui.util.UIUtil;
 import megamek.common.annotations.Nullable;
+import megamek.common.interfaces.ReportEntry;
+import megamek.common.rolls.Roll;
+import megamek.common.rolls.TargetRoll;
+import megamek.common.units.Entity;
 import megamek.logging.MMLogger;
 
 /**
@@ -86,6 +106,7 @@ public class Report implements ReportEntry {
      * helping the dial-up people :)
      */
 
+    @Serial
     private static final long serialVersionUID = -5586008091586682078L;
 
     private static final int MESSAGE_NONE = -1;
@@ -130,7 +151,7 @@ public class Report implements ReportEntry {
     public static final int DEFAULT_INDENTATION = 8; // was 4 previously
 
     /**
-     * Number of indentation levels allowed. Currently the same as the DEFAULT_INDENTATION value, to limit indentations
+     * Number of indentation levels allowed. Currently, the same as the DEFAULT_INDENTATION value, to limit indentations
      * to one level for a cleaner look of the report.
      */
     public static final int MAX_INDENTATION = 8;
@@ -471,6 +492,10 @@ public class Report implements ReportEntry {
         return this;
     }
 
+    public String span(String name, String text, String attributes) {
+        return "<span class='" + name + "' " + attributes + ">" + text + "</span>";
+    }
+
     /**
      * Shortcut method for adding entity name and owner data at the same time. Assumes that the entity name should be
      * obscured, but the owner should not.
@@ -490,6 +515,8 @@ public class Report implements ReportEntry {
             String ownerName = (owner != null) ? owner.getName() : ReportMessages.getString("report.unknownOwner");
 
             String unitName = href(ENTITY_LINK + entity.getId(), entity.getShortName());
+            // Wrap unit name in span with class and data attribute
+            unitName = span("entity-name", unitName, "data-entity-id='" + entity.getId() + "'");
 
             if ((entity.getCrew().getSize() >= 1) && !entity.getCrew().getNickname().isBlank()) {
                 unitName += fgColor(ownerColor, ' ' + entity.getCrew().getNickname().toUpperCase());
@@ -508,14 +535,14 @@ public class Report implements ReportEntry {
         this.showImage = showImage;
     }
 
-    public void obsureImg() {
+    public void obscureImg() {
         imageCode = "<span id='" + HIDDEN_ENTITY_NUM + "'></span>";
     }
 
     /**
      * Internal method. Not for typical use.
      * <p>
-     * Tests wheter the data value at the given index has been marked as obscured.
+     * Tests whether the data value at the given index has been marked as obscured.
      *
      * @param index position of data value (indexes are chronological and start at zero)
      *
@@ -587,11 +614,10 @@ public class Report implements ReportEntry {
             }
             return value;
         } catch (ArrayIndexOutOfBoundsException e) {
-            logger.error("Error: Report#getText --> Array Index out of Bounds Exception (index: "
-                  + index
-                  + ") for a report with ID "
-                  + messageId
-                  + ". Maybe Report#add wasn't called enough times for the amount of tags in the message?");
+            logger.error(
+                  "Error: Report#getText --> Array Index out of Bounds Exception (index: {}) for a report with ID {}. Maybe Report#add wasn't called enough times for the amount of tags in the message?",
+                  index,
+                  messageId);
             return "[Reporting Error: see megamek.log for details]";
         }
     }
@@ -601,6 +627,7 @@ public class Report implements ReportEntry {
      *
      * @return a String with the final report
      */
+    @Override
     public String text() {
         // The raw text of the message, with tags.
         String raw = ReportMessages.getString(String.valueOf(messageId));
@@ -610,7 +637,7 @@ public class Report implements ReportEntry {
 
         if (raw == null) {
             // Should we handle this better? Check alternate language files?
-            logger.error("No message found for ID " + messageId);
+            logger.error("No message found for ID {}", messageId);
             text.append("[Reporting Error for message ID ").append(messageId).append("]");
         } else {
             int i = 0;
@@ -661,10 +688,9 @@ public class Report implements ReportEntry {
             // add the sprite code at the beginning of the line
             if (imageCode != null && !imageCode.isEmpty()) {
                 if (text.toString().startsWith("<br>")) {
-                    text.insert(4, imageCode + "<br>" + getSpaces());
-                    // put text in a new line after the sprite image and add the current indentation level to it
+                    text.insert(4, imageCode);
                 } else {
-                    text.insert(0, imageCode + "<br>" + getSpaces());
+                    text.insert(0, imageCode);
                 }
             }
             text.append(raw.substring(mark));
@@ -677,6 +703,7 @@ public class Report implements ReportEntry {
             Report.mark(text);
         }
 
+        String finalReport;
         if (messageId == 3100 || messageId == 3101 || messageId == 3102 || messageId == 4005) { // if new attack
             Color clr = new Color(0, 0, 0);
 
@@ -687,7 +714,7 @@ public class Report implements ReportEntry {
                 clr = Color.decode(matcher.group());
             }
 
-            return "<div style='padding: 2px; background-color: rgba("
+            finalReport = "<div style='padding: 2px; background-color: rgba("
                   + clr.getRed()
                   + ","
                   + clr.getGreen()
@@ -695,13 +722,15 @@ public class Report implements ReportEntry {
                   + clr.getBlue()
                   + ","
                   + "0.15)'>"
-                  + text.toString()
+                  + text
                   + "</div>";
             //shade lines of each attacker in its player color
         } else {
-            return text.toString();
+            finalReport = text.toString();
         }
 
+        // Use span to keep reports inline - <br> tags handle line breaks
+        return "<span class='report-entry'>" + finalReport + "</span>";
     }
 
     @Override
@@ -711,15 +740,12 @@ public class Report implements ReportEntry {
     }
 
     private void handleIndentation(StringBuffer sb) {
-        if ((indentation == 0) || (sb.length() == 0)) {
+        if ((indentation == 0) || (sb.isEmpty())) {
             return;
         }
         int i = 0;
         while (sb.substring(i, i + 4).equals("<br>")) {
             i += 4;
-            if (i == sb.length()) {
-                continue;
-            }
         }
         sb.insert(i, getSpaces());
     }
@@ -777,41 +803,100 @@ public class Report implements ReportEntry {
         styleSheet.addRule("span.small { font-size: small; }");
         styleSheet.addRule("span.x-small { font-size: x-small; }");
         styleSheet.addRule("span.xx-small { font-size: xx-small; }");
-        //styleSheet.addRule("div.bgshade { background-color: rgba(0,0,0,0.2); }");
     }
 
+    /**
+     * Wraps text in a span with the given class name.
+     *
+     * @param name The class name.
+     * @param text The text to wrap.
+     * @return The HTML string.
+     */
     public String span(String name, String text) {
         return "<span class='" + name + "'>" + text + "</span>";
     }
 
+    /**
+     * Wraps text in a warning span.
+     *
+     * @param text The text to wrap.
+     * @return The HTML string.
+     */
     public String warning(String text) {
         return span("warning", text);
     }
 
+    /**
+     * Converts a Color object to a hex string.
+     *
+     * @param color The Color object.
+     * @return The hex string (e.g., "#RRGGBB").
+     */
     private static String hexColor(Color color) {
-        return String.format("#%06x", Integer.valueOf(color.getRGB() & 0x00FFFFFF));
+        return String.format("#%06x", color.getRGB() & 0x00FFFFFF);
     }
 
+    /**
+     * Wraps text in a span with the given foreground color.
+     *
+     * @param color The color to use.
+     * @param str   The text to wrap.
+     * @return The HTML string.
+     */
     public String fgColor(Color color, String str) {
         return fgColor(hexColor(color), str);
     }
 
+    /**
+     * Wraps text in a span with the given hex foreground color.
+     *
+     * @param hexColor The hex color string (e.g., "#RRGGBB").
+     * @param str      The text to wrap.
+     * @return The HTML string.
+     */
     public String fgColor(String hexColor, String str) {
         return "<span style='color:" + hexColor + "'>" + str + "</span>";
     }
 
+    /**
+     * Wraps text in a span with the given background color.
+     *
+     * @param color The color to use.
+     * @param str   The text to wrap.
+     * @return The HTML string.
+     */
     public String bgColor(Color color, String str) {
         return bgColor(hexColor(color), str);
     }
 
+    /**
+     * Wraps text in a span with the given hex background color.
+     *
+     * @param hexColor The hex color string (e.g., "#RRGGBB").
+     * @param str      The text to wrap.
+     * @return The HTML string.
+     */
     public String bgColor(String hexColor, String str) {
         return "<span style='background-color:" + hexColor + "'>" + str + "</span>";
     }
 
+    /**
+     * Wraps text in a bold tag.
+     *
+     * @param str The text to wrap.
+     * @return The HTML string.
+     */
     public static String bold(String str) {
         return "<B>" + str + "</B>";
     }
 
+    /**
+     * Creates an HTML anchor tag.
+     *
+     * @param href The URL.
+     * @param str  The link text.
+     * @return The HTML string.
+     */
     public String href(String href, String str) {
         return "<a href='" + href + "'>" + str + "</a>";
     }
@@ -861,13 +946,6 @@ public class Report implements ReportEntry {
     // debugReport method
     private static StringBuffer mark(StringBuffer sb) {
         sb.insert(0, "<hidden>");
-        /*int i = sb.length() - 1;
-        while (sb.charAt(i) == '<br>') {
-            i--;
-            if (i == 0) {
-                continue;
-            }
-        }*/
         sb.insert(sb.indexOf("<br>") + 4, "</hidden>");
         return sb;
     }

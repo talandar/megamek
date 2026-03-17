@@ -24,6 +24,11 @@
  *
  * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
  * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
 package megamek.client.ui.dialogs.customMek;
 
@@ -35,11 +40,12 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 
 import megamek.client.ui.GBC;
-import megamek.common.AmmoType;
-import megamek.common.Entity;
-import megamek.common.Mounted;
 import megamek.common.equipment.AmmoMounted;
+import megamek.common.equipment.AmmoType;
+import megamek.common.equipment.Mounted;
 import megamek.common.equipment.WeaponMounted;
+import megamek.common.options.OptionsConstants;
+import megamek.common.units.Entity;
 import megamek.common.weapons.infantry.InfantryWeapon;
 
 /**
@@ -69,16 +75,22 @@ public class WeaponAmmoChoicePanel extends JPanel {
         this.setLayout(new GridBagLayout());
 
         if (weaponMounted.isOneShot() ||
-                  (entity.isSupportVehicle() && (weaponMounted.getType() instanceof InfantryWeapon))) {
+              (entity.isSupportVehicle() && (weaponMounted.getType() instanceof InfantryWeapon))) {
             // One-shot weapons can only access their own bin
             matchingAmmoBins.add(weaponMounted.getLinkedAmmo());
             // Fusillade and some small SV weapons are treated like one-shot weapons but may have a second munition
             // type available.
             if ((weaponMounted.getLinked().getLinked() != null) &&
-                      (((AmmoType) weaponMounted.getLinked().getType()).getMunitionType() !=
-                             (((AmmoType) weaponMounted.getLinked().getLinked().getType()).getMunitionType()))) {
+                  (((AmmoType) weaponMounted.getLinked().getType()).getMunitionType() !=
+                        (((AmmoType) weaponMounted.getLinked().getLinked().getType()).getMunitionType()))) {
                 matchingAmmoBins.add((AmmoMounted) weaponMounted.getLinked().getLinked());
             }
+        } else if (weaponMounted.hasQuirk(OptionsConstants.QUIRK_WEAPON_NEG_STATIC_FEED)
+              && (weaponMounted.getLinkedAmmo() != null)) {
+            // Static Ammo Feed weapons are locked to their specific ammo bin (CamOps p.235/BMM p.89)
+            // Only use this path if the weapon already has linked ammo; otherwise fall through to
+            // the regular logic which uses canSwitchToAmmo() to find compatible bins
+            matchingAmmoBins.add(weaponMounted.getLinkedAmmo());
         } else {
             for (AmmoMounted ammoBin : weapon.getEntity().getAmmo()) {
                 if ((ammoBin.getLocation() != Entity.LOC_NONE) && AmmoType.canSwitchToAmmo(weapon, ammoBin.getType())) {
@@ -111,7 +123,7 @@ public class WeaponAmmoChoicePanel extends JPanel {
         for (Mounted<?> ammoBin : matchingAmmoBins) {
             boolean isInternal = ammoBin.isOneShotAmmo() || ammoBin.isOneShot() || (ammoBin.getLocation() == -1);
             String prefix = isInternal ? "(Internal) " :
-                                  "(" + ammoBin.getEntity().getLocationAbbr(ammoBin.getLocation()) + ") ";
+                  "(" + ammoBin.getEntity().getLocationAbbr(ammoBin.getLocation()) + ") ";
             String ammoBinName = prefix + ammoBin.getName();
             comboAmmoBins.addItem(ammoBinName);
 
@@ -152,9 +164,9 @@ public class WeaponAmmoChoicePanel extends JPanel {
 
             comboAmmoBins.removeItemAt(index);
             comboAmmoBins.insertItemAt("(" +
-                                             ammoBin.getEntity().getLocationAbbr(ammoBin.getLocation()) +
-                                             ") " +
-                                             selectedAmmoType.getName(), index);
+                  ammoBin.getEntity().getLocationAbbr(ammoBin.getLocation()) +
+                  ") " +
+                  selectedAmmoType.getName(), index);
 
             if (currentBinIndex == index) {
                 comboAmmoBins.setSelectedIndex(index);

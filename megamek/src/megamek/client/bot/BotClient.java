@@ -1,21 +1,35 @@
 /*
- * MegaMek - Copyright (C) 2000-2005 Ben Mazur (bmazur@sev.org)
- * Copyright (c) 2024 - The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2000-2005 Ben Mazur (bmazur@sev.org)
+ * Copyright (C) 2002-2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
  * MegaMek is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
  *
  * MegaMek is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with MegaMek. If not, see <http://www.gnu.org/licenses/>.
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
 package megamek.client.bot;
 
@@ -24,7 +38,15 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.InputStreamReader;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.Enumeration;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Vector;
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
 import javax.swing.JScrollPane;
@@ -35,31 +57,57 @@ import megamek.client.AbstractClient;
 import megamek.client.Client;
 import megamek.client.bot.princess.CardinalEdge;
 import megamek.client.ui.clientGUI.ClientGUI;
-import megamek.common.*;
-import megamek.common.AmmoType.AmmoTypeEnum;
-import megamek.common.AmmoType.Munitions;
+import megamek.common.ECMInfo;
+import megamek.common.Hex;
+import megamek.common.Player;
+import megamek.common.Report;
+import megamek.common.ToHitData;
 import megamek.common.actions.EntityAction;
 import megamek.common.actions.WeaponAttackAction;
 import megamek.common.annotations.Nullable;
+import megamek.common.board.Board;
+import megamek.common.board.BoardLocation;
+import megamek.common.board.Coords;
+import megamek.common.compute.Compute;
+import megamek.common.compute.ComputeECM;
 import megamek.common.enums.GamePhase;
+import megamek.common.equipment.AmmoType;
+import megamek.common.equipment.AmmoType.AmmoTypeEnum;
+import megamek.common.equipment.AmmoType.Munitions;
+import megamek.common.equipment.Minefield;
+import megamek.common.equipment.MiscType;
+import megamek.common.equipment.Mounted;
 import megamek.common.equipment.WeaponMounted;
+import megamek.common.equipment.WeaponType;
 import megamek.common.event.GameCFREvent;
 import megamek.common.event.GameListenerAdapter;
 import megamek.common.event.GamePhaseChangeEvent;
-import megamek.common.event.GamePlayerChatEvent;
 import megamek.common.event.GameReportEvent;
 import megamek.common.event.GameTurnChangeEvent;
+import megamek.common.event.player.GamePlayerChatEvent;
+import megamek.common.game.Game;
+import megamek.common.game.InitiativeRoll;
 import megamek.common.moves.MovePath;
 import megamek.common.net.packets.Packet;
 import megamek.common.options.OptionsConstants;
 import megamek.common.pathfinder.BoardClusterTracker;
 import megamek.common.preference.PreferenceManager;
+import megamek.common.rolls.TargetRoll;
+import megamek.common.turns.SpecificEntityTurn;
+import megamek.common.units.Entity;
+import megamek.common.units.EntityListFile;
+import megamek.common.units.EntityMovementMode;
+import megamek.common.units.IBuilding;
+import megamek.common.units.Infantry;
+import megamek.common.units.ProtoMek;
+import megamek.common.units.Terrains;
+import megamek.common.units.VTOL;
 import megamek.common.util.BoardUtilities;
 import megamek.common.util.StringUtil;
 import megamek.logging.MMLogger;
 
 public abstract class BotClient extends Client {
-    private final static MMLogger logger = MMLogger.create(BotClient.class);
+    private final static MMLogger LOGGER = MMLogger.create(BotClient.class);
 
     public static final int BOT_TURN_RETRY_COUNT = 3;
 
@@ -74,6 +122,9 @@ public abstract class BotClient extends Client {
      */
     boolean calculatedTurnThisPhase = false;
     int calculatedTurnsThisPhase = 0;
+
+    // Let bots remember whether they've rerolled an initiative roll this round
+    protected boolean rerolledInitiative = false;
 
     /**
      * Store a reference to the ClientGUI for the client who created this bot. This is used to ensure keep the ClientGUI
@@ -109,8 +160,8 @@ public abstract class BotClient extends Client {
                 // We want to ignore turns from other players and only listen to events we
                 // generated
                 boolean ignoreSimTurn = getGame().getPhase().isSimultaneous(getGame()) &&
-                                              (e.getPreviousPlayerId() != localPlayerNumber) &&
-                                              calculatedTurnThisPhase;
+                      (e.getPreviousPlayerId() != localPlayerNumber) &&
+                      calculatedTurnThisPhase;
 
                 if (isMyTurn() && !ignoreSimTurn) {
                     calculatedTurnThisPhase = true;
@@ -132,12 +183,13 @@ public abstract class BotClient extends Client {
             @Override
             public void gamePhaseChange(GamePhaseChangeEvent e) {
                 calculatedTurnThisPhase = false;
+                rerolledInitiative = false;
                 if (e.getOldPhase().isSimultaneous(getGame())) {
-                    logger.info(String.format("%s: Calculated %d / %d turns for phase %s",
+                    LOGGER.info("{}: Calculated {} / {} turns for phase {}",
                           getName(),
                           calculatedTurnsThisPhase,
                           getGame().getEntitiesOwnedBy(getLocalPlayer()),
-                          e.getOldPhase()));
+                          e.getOldPhase());
                 }
                 calculatedTurnsThisPhase = 0;
             }
@@ -154,6 +206,8 @@ public abstract class BotClient extends Client {
 
             @Override
             public void gameClientFeedbackRequest(GameCFREvent evt) {
+                WeaponAttackAction waa;
+
                 switch (evt.getCFRType()) {
                     case CFR_DOMINO_EFFECT:
                         // This will always send a "no action" response.
@@ -164,8 +218,26 @@ public abstract class BotClient extends Client {
                     case CFR_AMS_ASSIGN:
                         // Picks the WAA with the highest expected damage,
                         // essentially same as if the auto_ams option was on
-                        WeaponAttackAction waa = Compute.getHighestExpectedDamage(game, evt.getWAAs(), true);
-                        sendAMSAssignCFRResponse(evt.getWAAs().indexOf(waa));
+                        waa = Compute.getHighestExpectedDamage(game, evt.getWAAs(), true);
+
+                        // Add second weapon attack counter for the bot when playtest 3 is active
+                        WeaponAttackAction secondWaa = null;
+                        if (game.getOptions().booleanOption(OptionsConstants.PLAYTEST_3)) {
+                            secondWaa = Compute.getSecondHighestExpectedDamage(game, evt.getWAAs(), true);
+                        }
+
+                        // Adjusting for new response.
+                        int numInts = 1;
+                        if (secondWaa != null) {
+                            numInts = 2;
+                        }
+                        int[] indexes = new int[numInts];
+                        indexes[0] = evt.getWAAs().indexOf(waa);
+                        if (numInts == 2) {
+                            indexes[1] = evt.getWAAs().indexOf(secondWaa);
+                        }
+
+                        sendAMSAssignCFRResponse(indexes);
                         break;
                     case CFR_APDS_ASSIGN:
                         // Picks the WAA with the highest expected damage,
@@ -255,6 +327,18 @@ public abstract class BotClient extends Client {
     @Nullable
     protected abstract PhysicalOption calculatePhysicalTurn();
 
+    /**
+     * Calculate what to do during the PRE_END_DECLARATIONS phase.
+     * This phase allows infantry to initiate building/vessel combat.
+     */
+    protected abstract void calculatePreEndDeclarationsTurn();
+
+    /**
+     * Calculate what to do during the INFANTRY_VS_INFANTRY_COMBAT phase.
+     * This phase allows infantry to reinforce or withdraw from building/vessel combat.
+     */
+    protected abstract void calculateInfantryVsInfantryCombatTurn();
+
     protected Vector<EntityAction> calculatePointBlankShot(int firingEntityID, int targetID) {
         return new Vector<>();
     }
@@ -296,18 +380,18 @@ public abstract class BotClient extends Client {
         // unless doing so would kill it or be illegal due to stacking violation
         for (Entity currentEntity : getGame().getPlayerEntities(getLocalPlayer(), true)) {
             Entity transport = currentEntity.getTransportId() != Entity.NONE ?
-                                     getGame().getEntity(currentEntity.getTransportId()) :
-                                     null;
+                  getGame().getEntity(currentEntity.getTransportId()) :
+                  null;
 
             if (transport != null && transport.isPermanentlyImmobilized(true)) {
                 boolean stackingViolation = null !=
-                                                  Compute.stackingViolation(game,
-                                                        currentEntity.getId(),
-                                                        transport.getPosition(),
-                                                        currentEntity.climbMode());
+                      Compute.stackingViolation(game,
+                            currentEntity.getId(),
+                            transport.getPosition(),
+                            currentEntity.climbMode());
                 boolean unloadFatal = currentEntity.isBoardProhibited(getGame().getBoard(transport)) ||
-                                            currentEntity.isLocationProhibited(transport.getPosition()) ||
-                                            currentEntity.isLocationDeadly(transport.getPosition());
+                      currentEntity.isLocationProhibited(transport.getPosition()) ||
+                      currentEntity.isLocationDeadly(transport.getPosition());
 
                 if (!stackingViolation && !unloadFatal) {
                     entitiesToUnload.add(currentEntity.getId());
@@ -352,11 +436,11 @@ public abstract class BotClient extends Client {
             currentTurnEnemyEntities = new ArrayList<>();
             for (Entity entity : game.getEntitiesVector()) {
                 if (entity.getOwner().isEnemyOf(getLocalPlayer()) &&
-                          (entity.getPosition() != null) &&
-                          !entity.isOffBoard() &&
-                          (entity.getCrew() != null) &&
-                          !entity.getCrew().isDead() &&
-                          !entity.isHidden()) {
+                      (entity.getPosition() != null) &&
+                      !entity.isOffBoard() &&
+                      (entity.getCrew() != null) &&
+                      !entity.getCrew().isDead() &&
+                      !entity.isHidden()) {
                     currentTurnEnemyEntities.add(entity);
                 }
             }
@@ -374,8 +458,8 @@ public abstract class BotClient extends Client {
             currentTurnFriendlyEntities = new ArrayList<>();
             for (Entity entity : game.getEntitiesVector()) {
                 if (!entity.getOwner().isEnemyOf(getLocalPlayer()) &&
-                          (entity.getPosition() != null) &&
-                          !entity.isOffBoard()) {
+                      (entity.getPosition() != null) &&
+                      !entity.isOffBoard()) {
                     currentTurnFriendlyEntities.add(entity);
                 }
             }
@@ -397,8 +481,6 @@ public abstract class BotClient extends Client {
                 case DEPLOYMENT:
                     initialize();
                     break;
-                case PREMOVEMENT:
-                    break;
                 case MOVEMENT:
                     /*
                      * Do not uncomment this. It is so that bots stick around till end of game
@@ -412,7 +494,7 @@ public abstract class BotClient extends Client {
                     // if the game is not double blind and I can't see anyone
                     // else on the board I should kill myself.
                     if (!(game.getOptions().booleanOption(OptionsConstants.ADVANCED_DOUBLE_BLIND)) &&
-                              ((game.getEntitiesOwnedBy(getLocalPlayer()) - game.getNoOfEntities()) == 0)) {
+                          ((game.getEntitiesOwnedBy(getLocalPlayer()) - game.getNoOfEntities()) == 0)) {
                         die();
                     }
 
@@ -424,13 +506,9 @@ public abstract class BotClient extends Client {
                     }
                     initMovement();
                     break;
-                case PREFIRING:
-                    break;
                 case FIRING:
                     postMovementProcessing();
                     initFiring();
-                    break;
-                case PHYSICAL:
                     break;
                 case TARGETING:
                     initTargeting();
@@ -443,8 +521,15 @@ public abstract class BotClient extends Client {
                     endOfTurnProcessing();
                     // intentional fallthrough: all reports must click "done", otherwise the game
                     // never moves on.
-                case TARGETING_REPORT:
                 case INITIATIVE_REPORT:
+                    // Let bots use Tactical Genius
+                    if (decideToRerollInitiative()) {
+                        rerolledInitiative = true;
+                        sendRerollInitiativeRequest();
+                    }
+                    sendDone(true);
+                    break;
+                case TARGETING_REPORT:
                 case MOVEMENT_REPORT:
                 case OFFBOARD_REPORT:
                 case FIRING_REPORT:
@@ -460,7 +545,7 @@ public abstract class BotClient extends Client {
                     break;
             }
         } catch (Throwable t) {
-            logger.error(t, "changePhase");
+            LOGGER.error(t, "changePhase");
         }
     }
 
@@ -497,7 +582,7 @@ public abstract class BotClient extends Client {
             // Save the entities to the file.
             EntityListFile.saveTo(unitFile, living);
         } catch (Exception ex) {
-            logger.error(ex, "runEndGame");
+            LOGGER.error(ex, "runEndGame");
             doAlertDialog(Messages.getString("ClientGUI.errorSavingFile"), ex.getMessage());
         }
     }
@@ -533,7 +618,7 @@ public abstract class BotClient extends Client {
                 try {
                     Thread.sleep(Compute.randomInt(1000) + 500);
                 } catch (InterruptedException e) {
-                    logger.error(e, "calculateMyTurn");
+                    LOGGER.error(e, "calculateMyTurn");
                 }
             }
         }
@@ -570,7 +655,7 @@ public abstract class BotClient extends Client {
                 } else {
                     // This attempt to calculate the turn failed, but we don't want to log
                     // an exception here.
-                    logger.warn("Null move path; entity was {}", ((moverId != -1) ? "ID " + moverId : "Unknown"));
+                    LOGGER.warn("Null move path; entity was {}", ((moverId != -1) ? "ID " + moverId : "Unknown"));
                     return false;
                 }
             } else if (game.getPhase().isFiring()) {
@@ -588,7 +673,7 @@ public abstract class BotClient extends Client {
                 calculateDeployment();
             } else if (game.getPhase().isDeployMinefields()) {
                 deployMinefields();
-            } else if (game.getPhase().isSetArtilleryAutohitHexes()) {
+            } else if (game.getPhase().isSetArtilleryAutoHitHexes()) {
                 // For now, declare no auto hit hexes.
                 Vector<BoardLocation> autoHitHexes = calculateArtyAutoHitHexes();
                 sendArtyAutoHitHexes(autoHitHexes);
@@ -596,13 +681,17 @@ public abstract class BotClient extends Client {
                 // Princess implements arty targeting
                 // TODO: TAG should be handled separately.
                 calculateTargetingOffBoardTurn();
-            } else if (game.getPhase().isPremovement() || game.getPhase().isPrefiring()) {
+            } else if (game.getPhase().isPremovement() || game.getPhase().isPreFiring()) {
                 calculatePrePhaseTurn();
+            } else if (game.getPhase().isPreEndDeclarations()) {
+                calculatePreEndDeclarationsTurn();
+            } else if (game.getPhase().isInfantryVsInfantryCombat()) {
+                calculateInfantryVsInfantryCombatTurn();
             }
 
             return true;
         } catch (Exception ex) {
-            logger.error(ex, "calculateMyTurnWorker");
+            LOGGER.error(ex, "calculateMyTurnWorker");
             return false;
         }
     }
@@ -644,14 +733,15 @@ public abstract class BotClient extends Client {
                   deployedUnit.getElevation(),
                   dest,
                   null,
-                  deployedUnit.climbMode());
+                  deployedUnit.climbMode(),
+                  true);
             // Ignore coords that could cause a stacking violation
             if (violation != null) {
                 continue;
             }
 
             // Make sure we don't overload any buildings in this hex.
-            Building building = game.getBoard(deployedUnit).getBuildingAt(dest);
+            IBuilding building = game.getBoard(deployedUnit).getBuildingAt(dest);
             if (null != building) {
                 double mass = getMassOfAllInBuilding(game, dest, deployedUnit.getBoardId()) + deployedUnit.getWeight();
                 if (mass > building.getCurrentCF(dest)) {
@@ -683,11 +773,11 @@ public abstract class BotClient extends Client {
             for (int y = 0; y <= board.getHeight(); y++) {
                 Coords c = new Coords(x, y);
                 if (board.isLegalDeployment(c, deployed_ent) &&
-                          !deployed_ent.isLocationProhibited(c,
-                                ((deployed_ent.isAirborne() || deployed_ent.getMovementMode().isHoverVTOLOrWiGE()) ?
-                                       deployed_ent.getElevation() :
-                                       0)) &&
-                          !deployed_ent.isLocationDeadly(c)) {
+                      !deployed_ent.isLocationProhibited(c,
+                            ((deployed_ent.isAirborne() || deployed_ent.getMovementMode().isHoverVTOLOrWiGE()) ?
+                                  deployed_ent.getElevation() :
+                                  0)) &&
+                      !deployed_ent.isLocationDeadly(c)) {
                     validCoords.add(new RankedCoords(c, 0));
                 }
             }
@@ -719,9 +809,9 @@ public abstract class BotClient extends Client {
         for (Mounted<?> mounted : deployed_ent.getWeaponList()) {
             WeaponType weaponType = (WeaponType) mounted.getType();
             if ((!weaponType.getName().equals("ATM 3")) &&
-                      (!weaponType.getName().equals("ATM 6")) &&
-                      (!weaponType.getName().equals("ATM 9")) &&
-                      (!weaponType.getName().equals("ATM 12"))) {
+                  (!weaponType.getName().equals("ATM 6")) &&
+                  (!weaponType.getName().equals("ATM 9")) &&
+                  (!weaponType.getName().equals("ATM 12"))) {
                 if (deployed_ent.getC3Master() != null) {
                     av_range += weaponType.getLongRange() * 1.25;
                 } else {
@@ -834,7 +924,7 @@ public abstract class BotClient extends Client {
                 int x = coord.getX();
                 int y = coord.getY();
                 if (board.getHex(x, y).containsTerrain(Terrains.WOODS) &&
-                          board.getHex(x, y).terrainLevel(Terrains.FOLIAGE_ELEV) > 1) {
+                      board.getHex(x, y).terrainLevel(Terrains.FOLIAGE_ELEV) > 1) {
                     coord.fitness += 1;
                 }
                 if (board.getHex(x, y).containsTerrain(Terrains.WATER)) {
@@ -877,8 +967,8 @@ public abstract class BotClient extends Client {
                     highestHex = coord.getCoords().translated(x);
                     for (Entity test_ent : game.getEntitiesVector(highestHex, deployed_ent.getBoardId())) {
                         if ((owner.equals(test_ent.getOwner())) &&
-                                  !deployed_ent.equals(test_ent) &&
-                                  (test_ent instanceof Infantry)) {
+                              !deployed_ent.equals(test_ent) &&
+                              (test_ent instanceof Infantry)) {
 
                             coord.fitness += 1;
                             foundAdj = true;
@@ -987,7 +1077,7 @@ public abstract class BotClient extends Client {
 
     private double potentialBuildingDamage(int x, int y, Entity entity) {
         Coords coords = new Coords(x, y);
-        Building building = game.getBoard(entity).getBuildingAt(coords);
+        IBuilding building = game.getBoard(entity).getBuildingAt(coords);
         if (building == null) {
             return 0;
         }
@@ -1000,20 +1090,31 @@ public abstract class BotClient extends Client {
     // Missile hits table
     // Some of these are interpolated for odd weapons sizes found in Protos and
     // new BAs
-    private static float[] expectedHitsByRackSize = { 0.0f, 1.0f, 1.58f, 2.0f, 2.63f, 3.17f, 4.0f, 4.49f, 4.98f, 5.47f,
-                                                      6.31f, 7.23f, 8.14f, 8.59f, 9.04f, 9.5f, 0.0f, 0.0f, 0.0f, 0.0f,
-                                                      12.7f };
+    private static final float[] expectedHitsByRackSize = { 0.0f, 1.0f, 1.58f, 2.0f, 2.63f, 3.17f, 4.0f, 4.49f, 4.98f,
+                                                            5.47f,
+                                                            6.31f, 7.23f, 8.14f, 8.59f, 9.04f, 9.5f, 0.0f, 0.0f, 0.0f,
+                                                            0.0f,
+                                                            12.7f };
 
     /**
      * Determines the expected damage of a weapon attack, based on to-hit, salvo sizes, etc. This has been copied almost
      * wholesale from Compute.getExpectedDamage; the log file print commands were removed due to excessive data
      * generated
      */
-    private static float getDeployDamage(Game g, WeaponAttackAction waa, List<ECMInfo> allECMInfo) {
-        Entity attacker = g.getEntity(waa.getEntityId());
+    private static float getDeployDamage(Game game, WeaponAttackAction weaponAttackAction, List<ECMInfo> allECMInfo) {
+        Entity weaponEntity = game.getEntity(weaponAttackAction.getEntityId());
+        if (weaponEntity == null) {
+            return 0.0f;
+        }
+
+        Entity attacker = weaponEntity.getAttackingEntity();
+        if (attacker == null) {
+            return 0.0f;
+        }
+
         boolean naturalAptGunnery = attacker.hasAbility(OptionsConstants.PILOT_APTITUDE_GUNNERY);
-        Mounted<?> weapon = attacker.getEquipment(waa.getWeaponId());
-        ToHitData hitData = waa.toHit(g, allECMInfo);
+        Mounted<?> weapon = attacker.getEquipment(weaponAttackAction.getWeaponId());
+        ToHitData hitData = weaponAttackAction.toHit(game, allECMInfo);
         if (hitData.getValue() > 12) {
             return 0.0f;
         }
@@ -1029,7 +1130,7 @@ public abstract class BotClient extends Client {
 
         float fDamage;
         WeaponType wt = (WeaponType) weapon.getType();
-        if (wt.getDamage() == WeaponType.DAMAGE_BY_CLUSTERTABLE) {
+        if (wt.getDamage() == WeaponType.DAMAGE_BY_CLUSTER_TABLE) {
             if (weapon.getLinked() == null) {
                 return 0.0f;
             }
@@ -1044,7 +1145,7 @@ public abstract class BotClient extends Client {
                 fHits = expectedHitsByRackSize[wt.getRackSize()];
             }
             // adjust for previous AMS
-            List<WeaponMounted> vCounters = waa.getCounterEquipment();
+            List<WeaponMounted> vCounters = weaponAttackAction.getCounterEquipment();
             if (wt.hasFlag(WeaponType.F_MISSILE) && vCounters != null) {
                 for (WeaponMounted vCounter : vCounters) {
                     WeaponType type = vCounter.getType();
@@ -1163,7 +1264,7 @@ public abstract class BotClient extends Client {
             // Don't do anything, just return a null and allow the bot to remain silent
             return null;
         } catch (Exception ex) {
-            logger.error(ex, "Error while reading ./mmconf/botmessages.txt");
+            LOGGER.error(ex, "Error while reading ./mmconf/botmessages.txt");
             return null;
         }
 
@@ -1194,7 +1295,7 @@ public abstract class BotClient extends Client {
             String oldName = getName();
             String newName = (String) (inP.getObject(0));
             if (!this.equals(bots.get(oldName))) {
-                logger.error("Name correction arrived at incorrect BotClient!");
+                LOGGER.error("Name correction arrived at incorrect BotClient!");
                 return;
             }
             bots.remove(oldName);
@@ -1251,6 +1352,7 @@ public abstract class BotClient extends Client {
         getLocalPlayer().setNbrMFConventional(0);
         getLocalPlayer().setNbrMFInferno(0);
         getLocalPlayer().setNbrMFVibra(0);
+        getLocalPlayer().setNbrMFEMP(0);
         sendPlayerInfo();
     }
 
@@ -1289,10 +1391,11 @@ public abstract class BotClient extends Client {
                                               Minefield.TYPE_CONVENTIONAL),
                                         new MinefieldNumbers(getLocalPlayer().getNbrMFVibra(),
                                               Minefield.TYPE_VIBRABOMB),
+                                        new MinefieldNumbers(getLocalPlayer().getNbrMFEMP(),
+                                              Minefield.TYPE_EMP),
                                         // the following are added for completeness, but are not used by the bot
                                         new MinefieldNumbers(0, Minefield.TYPE_COMMAND_DETONATED),
                                         // no command detonated mines
-                                        new MinefieldNumbers(0, Minefield.TYPE_EMP), // no field for EMP mines exists
         };
     }
 
@@ -1312,6 +1415,34 @@ public abstract class BotClient extends Client {
     @Override
     public String receiveReport(List<Report> reports) {
         return "";
+    }
+
+    /**
+     * Let the bot decide whether to reroll initiative based on report info
+     *
+     * @return true if Tactical Genius A) is available, B) hasn't been used already, and C) would improve our initiative
+     *       vs enemy players; otherwise return false.
+     */
+    protected boolean decideToRerollInitiative() {
+        Player me = getLocalPlayer();
+        if (game.hasTacticalGenius(me)) {
+            if (!rerolledInitiative) {
+                InitiativeRoll myRoll = me.getInitiative();
+                InitiativeRoll otherRoll;
+                List<Player> others = game.getPlayersList()
+                      .stream()
+                      .filter(p -> p != me && p.isEnemyOf(me))
+                      .toList();
+                for (Player other : others) {
+                    otherRoll = other.getInitiative();
+                    if (otherRoll.size() > 0 &&
+                          myRoll.getRoll(myRoll.size() - 1) < otherRoll.getRoll(otherRoll.size() - 1)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -1363,11 +1494,9 @@ public abstract class BotClient extends Client {
             if (this == o) {
                 return true;
             }
-            if (!(o instanceof RankedCoords)) {
+            if (!(o instanceof RankedCoords coords1)) {
                 return false;
             }
-
-            RankedCoords coords1 = (RankedCoords) o;
 
             if (Double.compare(coords1.fitness, fitness) != 0) {
                 return false;
@@ -1382,8 +1511,7 @@ public abstract class BotClient extends Client {
 
         @Override
         public int hashCode() {
-            long temp = Double.doubleToLongBits(fitness);
-            return 31 * coords.hashCode() + (int) (temp ^ (temp >>> 32));
+            return 31 * coords.hashCode() + Double.hashCode(fitness);
         }
 
         @Override

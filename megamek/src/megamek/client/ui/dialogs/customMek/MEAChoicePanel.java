@@ -24,6 +24,11 @@
  *
  * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
  * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
 package megamek.client.ui.dialogs.customMek;
 
@@ -37,12 +42,12 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 
 import megamek.client.ui.GBC;
-import megamek.common.BattleArmor;
-import megamek.common.Entity;
-import megamek.common.EquipmentType;
-import megamek.common.LocationFullException;
-import megamek.common.MiscType;
-import megamek.common.Mounted;
+import megamek.common.battleArmor.BattleArmor;
+import megamek.common.units.Entity;
+import megamek.common.equipment.EquipmentType;
+import megamek.common.exceptions.LocationFullException;
+import megamek.common.equipment.MiscType;
+import megamek.common.equipment.Mounted;
 import megamek.common.equipment.MiscMounted;
 import megamek.logging.MMLogger;
 
@@ -93,7 +98,7 @@ public class MEAChoicePanel extends JPanel {
             String manipulatorName = manipulator.getName() + " (" + manipulator.getTonnage(this.entity) + "kg)";
             comboChoices.addItem(manipulatorName);
             if (equipmentType != null &&
-                      Objects.equals(manipulator.getInternalName(), equipmentType.getInternalName())) {
+                  Objects.equals(manipulator.getInternalName(), equipmentType.getInternalName())) {
                 comboChoices.setSelectedIndex(x);
             }
         }

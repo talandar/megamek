@@ -1,7 +1,7 @@
 /*
- * MegaMek - Copyright (C) 2005, 2006 Ben Mazur (bmazur@sev.org)
+  Copyright (C) 2005, 2006 Ben Mazur (bmazur@sev.org)
  * Copyright © 2013 Edward Cullen (eddy@obsessedcomputers.co.uk)
- * Copyright (C) 2014-2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2005-2025 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -26,7 +26,13 @@
  *
  * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
  * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
+
 package megamek;
 
 import java.io.File;
@@ -47,21 +53,21 @@ import javax.swing.ToolTipManager;
 import javax.swing.UIManager;
 
 import io.sentry.Sentry;
-import megamek.client.ui.preferences.SuitePreferences;
 import megamek.client.ui.clientGUI.ButtonOrderPreferences;
 import megamek.client.ui.clientGUI.MegaMekGUI;
+import megamek.client.ui.preferences.SuitePreferences;
 import megamek.client.ui.util.FontHandler;
 import megamek.common.annotations.Nullable;
-import megamek.common.commandline.AbstractCommandLineParser;
-import megamek.common.commandline.ClientServerCommandLineParser;
-import megamek.common.commandline.MegaMekCommandLineFlag;
-import megamek.common.commandline.MegaMekCommandLineParser;
+import megamek.common.commandLine.AbstractCommandLineParser;
+import megamek.common.commandLine.ClientServerCommandLineParser;
+import megamek.common.commandLine.MegaMekCommandLineFlag;
+import megamek.common.commandLine.MegaMekCommandLineParser;
 import megamek.common.net.marshalling.SanityInputFilter;
 import megamek.common.preference.PreferenceManager;
+import megamek.common.ui.RATGeneratorEditor;
 import megamek.logging.MMLogger;
 import megamek.server.DedicatedServer;
 import megamek.utilities.GifWriter;
-import megamek.utilities.RATGeneratorEditor;
 
 /**
  * This is the primary MegaMek class.

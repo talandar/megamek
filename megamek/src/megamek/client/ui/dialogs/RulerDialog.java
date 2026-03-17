@@ -1,15 +1,35 @@
 /*
- * MegaMek - Copyright (C) 2003 Ben Mazur (bmazur@sev.org)
+ * Copyright (C) 2003 Ben Mazur (bmazur@sev.org)
+ * Copyright (C) 2003-2025 The MegaMek Team. All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
+ * This file is part of MegaMek.
  *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
- * for more details.
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
 package megamek.client.ui.dialogs;
 
@@ -22,7 +42,7 @@ import java.awt.event.InputEvent;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.WindowEvent;
-
+import java.io.Serial;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JDialog;
@@ -38,12 +58,12 @@ import megamek.client.event.BoardViewEvent;
 import megamek.client.event.BoardViewListener;
 import megamek.client.ui.Messages;
 import megamek.client.ui.clientGUI.boardview.BoardView;
-import megamek.common.Coords;
-import megamek.common.Entity;
-import megamek.common.Game;
+import megamek.common.board.Coords;
+import megamek.common.units.Entity;
+import megamek.common.game.Game;
 import megamek.common.LosEffects;
-import megamek.common.Mek;
-import megamek.common.TargetRoll;
+import megamek.common.units.Mek;
+import megamek.common.rolls.TargetRoll;
 import megamek.common.ToHitData;
 import megamek.logging.MMLogger;
 
@@ -53,6 +73,7 @@ import megamek.logging.MMLogger;
 public class RulerDialog extends JDialog implements BoardViewListener {
     private static final MMLogger logger = MMLogger.create(RulerDialog.class);
 
+    @Serial
     private static final long serialVersionUID = -4820402626782115601L;
     public static Color color1 = Color.cyan;
     public static Color color2 = Color.magenta;
@@ -62,35 +83,28 @@ public class RulerDialog extends JDialog implements BoardViewListener {
     private Color startColor;
     private Color endColor;
     private int distance;
-    private Client client;
-    private BoardView bv;
-    private Game game;
+    private final BoardView bv;
+    private final Game game;
     private boolean flip;
 
-    private JPanel buttonPanel;
-    private GridBagLayout gridBagLayout1 = new GridBagLayout();
-    private JButton butFlip = new JButton();
-    private JLabel jLabel1;
-    private JTextField tf_start = new JTextField();
-    private JLabel jLabel2;
-    private JTextField tf_end = new JTextField();
-    private JLabel jLabel3;
-    private JTextField tf_distance = new JTextField();
-    private JLabel jLabel4;
-    private JTextField tf_los1 = new JTextField();
-    private JLabel jLabel5;
-    private JTextField tf_los2 = new JTextField();
-    private JButton butClose = new JButton();
+    private final GridBagLayout gridBagLayout1 = new GridBagLayout();
+    private final JButton butFlip = new JButton();
+    private final JTextField tf_start = new JTextField();
+    private final JTextField tf_end = new JTextField();
+    private final JTextField tf_distance = new JTextField();
+    private final JTextField tf_los1 = new JTextField();
+    private final JTextField tf_los2 = new JTextField();
+    private final JButton butClose = new JButton();
     private JLabel heightLabel1;
-    private JTextField height1 = new JTextField();
+    private final JTextField height1 = new JTextField();
     private JLabel heightLabel2;
-    private JTextField height2 = new JTextField();
+    private final JTextField height2 = new JTextField();
 
-    private JCheckBox cboIsMek1 = new JCheckBox(Messages.getString("Ruler.isMek"));
-    private JCheckBox cboIsMek2 = new JCheckBox(Messages.getString("Ruler.isMek"));
+    private final JCheckBox cboIsMek1 = new JCheckBox(Messages.getString("Ruler.isMek"));
+    private final JCheckBox cboIsMek2 = new JCheckBox(Messages.getString("Ruler.isMek"));
 
-    public RulerDialog(JFrame f, Client c, BoardView b, Game g) {
-        super(f, Messages.getString("Ruler.title"), false);
+    public RulerDialog(JFrame frame, Client client, BoardView boardView, Game game) {
+        super(frame, Messages.getString("Ruler.title"), false);
         enableEvents(AWTEvent.WINDOW_EVENT_MASK);
 
         start = null;
@@ -99,10 +113,9 @@ public class RulerDialog extends JDialog implements BoardViewListener {
         startColor = color1;
         endColor = color2;
 
-        bv = b;
-        client = c;
-        game = g;
-        b.addBoardViewListener(this);
+        bv = boardView;
+        this.game = game;
+        boardView.addBoardViewListener(this);
 
         try {
             jbInit();
@@ -113,24 +126,24 @@ public class RulerDialog extends JDialog implements BoardViewListener {
     }
 
     private void jbInit() {
-        buttonPanel = new JPanel();
+        JPanel buttonPanel = new JPanel();
         butFlip.setText(Messages.getString("Ruler.flip"));
         butFlip.addActionListener(e -> butFlip_actionPerformed());
         JPanel panelMain = new JPanel(gridBagLayout1);
-        jLabel1 = new JLabel(Messages.getString("Ruler.Start"), SwingConstants.RIGHT);
+        JLabel jLabel1 = new JLabel(Messages.getString("Ruler.Start"), SwingConstants.RIGHT);
         tf_start.setEditable(false);
         tf_start.setColumns(16);
-        jLabel2 = new JLabel(Messages.getString("Ruler.End"), SwingConstants.RIGHT);
+        JLabel jLabel2 = new JLabel(Messages.getString("Ruler.End"), SwingConstants.RIGHT);
         tf_end.setEditable(false);
         tf_end.setColumns(16);
-        jLabel3 = new JLabel(Messages.getString("Ruler.Distance"), SwingConstants.RIGHT);
+        JLabel jLabel3 = new JLabel(Messages.getString("Ruler.Distance"), SwingConstants.RIGHT);
         tf_distance.setEditable(false);
         tf_distance.setColumns(5);
-        jLabel4 = new JLabel(Messages.getString("Ruler.POV") + ":", SwingConstants.RIGHT);
+        JLabel jLabel4 = new JLabel(Messages.getString("Ruler.POV") + ":", SwingConstants.RIGHT);
         jLabel4.setForeground(startColor);
         tf_los1.setEditable(false);
         tf_los1.setColumns(30);
-        jLabel5 = new JLabel(Messages.getString("Ruler.POV") + ":", SwingConstants.RIGHT);
+        JLabel jLabel5 = new JLabel(Messages.getString("Ruler.POV") + ":", SwingConstants.RIGHT);
         jLabel5.setForeground(endColor);
         tf_los2.setEditable(false);
         tf_los2.setColumns(30);
@@ -291,9 +304,9 @@ public class RulerDialog extends JDialog implements BoardViewListener {
         boolean isMek = false;
         boolean entFound = false;
         for (Entity ent : game.getEntitiesVector(c)) {
-            int trAbsheight = ent.relHeight();
-            if (trAbsheight > absHeight) {
-                absHeight = trAbsheight;
+            int trAbsHeight = ent.relHeight();
+            if (trAbsHeight > absHeight) {
+                absHeight = trAbsHeight;
                 isMek = ent instanceof Mek;
                 entFound = true;
             }
@@ -341,14 +354,14 @@ public class RulerDialog extends JDialog implements BoardViewListener {
         ToHitData thd;
         if (flip) {
             thd = LosEffects.calculateLos(game,
-                    buildAttackInfo(start, end, h1, h2, cboIsMek1.isSelected(),
-                            cboIsMek2.isSelected()))
-                    .losModifiers(game);
+                        buildAttackInfo(start, end, h1, h2, cboIsMek1.isSelected(),
+                              cboIsMek2.isSelected()))
+                  .losModifiers(game);
         } else {
             thd = LosEffects.calculateLos(game,
-                    buildAttackInfo(end, start, h2, h1, cboIsMek2.isSelected(),
-                            cboIsMek1.isSelected()))
-                    .losModifiers(game);
+                        buildAttackInfo(end, start, h2, h1, cboIsMek2.isSelected(),
+                              cboIsMek1.isSelected()))
+                  .losModifiers(game);
         }
         if (thd.getValue() != TargetRoll.IMPOSSIBLE) {
             toHit1 = thd.getValue() + " = ";
@@ -357,14 +370,14 @@ public class RulerDialog extends JDialog implements BoardViewListener {
 
         if (flip) {
             thd = LosEffects.calculateLos(game,
-                    buildAttackInfo(end, start, h2, h1, cboIsMek2.isSelected(),
-                            cboIsMek1.isSelected()))
-                    .losModifiers(game);
+                        buildAttackInfo(end, start, h2, h1, cboIsMek2.isSelected(),
+                              cboIsMek1.isSelected()))
+                  .losModifiers(game);
         } else {
             thd = LosEffects.calculateLos(game,
-                    buildAttackInfo(start, end, h1, h2, cboIsMek1.isSelected(),
-                            cboIsMek2.isSelected()))
-                    .losModifiers(game);
+                        buildAttackInfo(start, end, h1, h2, cboIsMek1.isSelected(),
+                              cboIsMek2.isSelected()))
+                  .losModifiers(game);
         }
         if (thd.getValue() != TargetRoll.IMPOSSIBLE) {
             toHit2 = thd.getValue() + " = ";
@@ -381,26 +394,21 @@ public class RulerDialog extends JDialog implements BoardViewListener {
     }
 
     /**
-     * Ignores determining if the attack is on land or under water.
+     * Ignores determining if the attack is on land or underwater.
      *
-     * @param c1
-     * @param c2
-     * @param h1
-     * @param h2
-     * @return
      */
-    private LosEffects.AttackInfo buildAttackInfo(Coords c1, Coords c2, int h1,
-            int h2, boolean attackerIsMek, boolean targetIsMek) {
-        LosEffects.AttackInfo ai = new LosEffects.AttackInfo();
-        ai.attackPos = c1;
-        ai.targetPos = c2;
-        ai.attackHeight = h1;
-        ai.targetHeight = h2;
-        ai.attackerIsMek = attackerIsMek;
-        ai.targetIsMek = targetIsMek;
-        ai.attackAbsHeight = game.getBoard().getHex(c1).floor() + h1;
-        ai.targetAbsHeight = game.getBoard().getHex(c2).floor() + h2;
-        return ai;
+    private LosEffects.AttackInfo buildAttackInfo(Coords c1, Coords c2, int h1, int h2, boolean attackerIsMek,
+          boolean targetIsMek) {
+        LosEffects.AttackInfo attackInfo = new LosEffects.AttackInfo();
+        attackInfo.attackPos = c1;
+        attackInfo.targetPos = c2;
+        attackInfo.attackHeight = h1;
+        attackInfo.targetHeight = h2;
+        attackInfo.attackerIsMek = attackerIsMek;
+        attackInfo.targetIsMek = targetIsMek;
+        attackInfo.attackAbsHeight = game.getBoard().getHex(c1).floor() + h1;
+        attackInfo.targetAbsHeight = game.getBoard().getHex(c2).floor() + h2;
+        return attackInfo;
     }
 
     @Override

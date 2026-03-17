@@ -24,6 +24,11 @@
  *
  * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
  * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
 package megamek.client.ui.dialogs.customMek;
 
@@ -40,17 +45,16 @@ import javax.swing.JPanel;
 
 import megamek.client.ui.GBC;
 import megamek.client.ui.Messages;
-import megamek.client.ui.clientGUI.ClientGUI;
 import megamek.codeUtilities.MathUtility;
-import megamek.common.AmmoType;
-import megamek.common.BattleArmor;
-import megamek.common.Entity;
-import megamek.common.Game;
-import megamek.common.Mounted;
-import megamek.common.ProtoMek;
+import megamek.common.battleArmor.BattleArmor;
 import megamek.common.equipment.AmmoMounted;
+import megamek.common.equipment.AmmoType;
+import megamek.common.equipment.Mounted;
+import megamek.common.game.Game;
 import megamek.common.options.GameOptions;
 import megamek.common.options.OptionsConstants;
+import megamek.common.units.Entity;
+import megamek.common.units.ProtoMek;
 
 public class MunitionChoicePanel extends JPanel {
     @Serial
@@ -73,11 +77,6 @@ public class MunitionChoicePanel extends JPanel {
     JLabel labHotLoad = new JLabel(Messages.getString("CustomMekDialog.switchToHotLoading"));
 
     JCheckBox chHotLoad = new JCheckBox();
-
-    public MunitionChoicePanel(AmmoMounted ammoMounted, ArrayList<AmmoType> vTypes,
-                               List<WeaponAmmoChoicePanel> weaponAmmoChoicePanels, Entity entity, ClientGUI clientGUI) {
-        this(ammoMounted, vTypes, weaponAmmoChoicePanels, entity, clientGUI.getClient().getGame());
-    }
 
     public MunitionChoicePanel(AmmoMounted ammoMounted, ArrayList<AmmoType> vTypes,
           List<WeaponAmmoChoicePanel> weaponAmmoChoicePanels, Entity entity, Game game) {
@@ -188,8 +187,8 @@ public class MunitionChoicePanel extends JPanel {
             add(chDump, GBC.eol());
         }
 
-        if (gameOptions.booleanOption(OptionsConstants.ADVCOMBAT_TACOPS_HOTLOAD) &&
-                  ammoType.hasFlag(AmmoType.F_HOTLOAD)) {
+        if (gameOptions.booleanOption(OptionsConstants.ADVANCED_COMBAT_TAC_OPS_HOT_LOAD) &&
+              ammoType.hasFlag(AmmoType.F_HOTLOAD)) {
             add(labHotLoad, GBC.std());
             add(chHotLoad, GBC.eol());
         }
@@ -208,7 +207,7 @@ public class MunitionChoicePanel extends JPanel {
 
         // set # shots only for non-one shot weapons
         if (ammoMounted.getLocation() != Entity.LOC_NONE &&
-                  comboNumberOfShots.getSelectedItem() instanceof String value) {
+              comboNumberOfShots.getSelectedItem() instanceof String value) {
             ammoMounted.setShotsLeft(MathUtility.parseInt(value, 0));
         }
 
@@ -216,7 +215,7 @@ public class MunitionChoicePanel extends JPanel {
             ammoMounted.setShotsLeft(0);
         }
 
-        if (gameOptions.booleanOption(OptionsConstants.ADVCOMBAT_TACOPS_HOTLOAD)) {
+        if (gameOptions.booleanOption(OptionsConstants.ADVANCED_COMBAT_TAC_OPS_HOT_LOAD)) {
             if (chHotLoad.isSelected() != ammoMounted.isHotLoaded()) {
                 ammoMounted.setHotLoad(chHotLoad.isSelected());
                 // Set the mode too, so vehicles can switch back

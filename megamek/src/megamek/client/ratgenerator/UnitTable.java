@@ -1,15 +1,34 @@
 /*
- * MegaMek - Copyright (C) 2016 The MegaMek Team
+ * Copyright (C) 2016-2025 The MegaMek Team. All Rights Reserved.
  *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms of the GNU General Public License as published by the Free
- *  Software Foundation; either version 2 of the License, or (at your option)
- *  any later version.
+ * This file is part of MegaMek.
  *
- *  This program is distributed in the hope that it will be useful, but
- *  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- *  or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
- *  for more details.
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
 package megamek.client.ratgenerator;
 
@@ -22,10 +41,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-import megamek.common.Compute;
-import megamek.common.EntityMovementMode;
-import megamek.common.MekSummary;
+import megamek.common.compute.Compute;
+import megamek.common.units.EntityMovementMode;
+import megamek.common.loaders.MekSummary;
 import megamek.common.annotations.Nullable;
+import megamek.common.units.EntityWeightClass;
+import megamek.common.units.UnitType;
 import megamek.logging.MMLogger;
 
 /**
@@ -59,10 +80,10 @@ public class UnitTable {
      * it to the cache. This method is provided as a convenience for when there are no excluded roles.
      *
      * @param faction          The faction the table filters for
-     * @param unitType         {@link megamek.common.UnitType} constant with the type of unit
+     * @param unitType         {@link UnitType} constant with the type of unit
      * @param year             the game year
      * @param rating           the unit's equipment rating; if null, the table is not adjusted for unit rating.
-     * @param weightClasses    a collection of {@link megamek.common.EntityWeightClass} constants to include in the
+     * @param weightClasses    a collection of {@link EntityWeightClass} constants to include in the
      *                         table; if null or empty all weight classes are included
      * @param networkMask      One of the {@link ModelRecord} NETWORK constants, for filtering various C3 systems
      * @param movementModes    the movement modes covered by the table, null/empty for all modes
@@ -96,10 +117,10 @@ public class UnitTable {
      * Overloaded method, with additional argument for excluded roles
      *
      * @param faction          The faction the table filters for
-     * @param unitType         {@link megamek.common.UnitType} constant with the type of unit
+     * @param unitType         {@link UnitType} constant with the type of unit
      * @param year             the game year
      * @param rating           the unit's equipment rating; if null, the table is not adjusted for unit rating.
-     * @param weightClasses    collection of {@link megamek.common.EntityWeightClass} constants to include in the table;
+     * @param weightClasses    collection of {@link EntityWeightClass} constants to include in the table;
      *                         if null or empty all weight classes are included
      * @param networkMask      One of the {@link ModelRecord} NETWORK constants, for filtering various C3 systems
      * @param movementModes    the movement modes covered by the table, null/empty for all modes
@@ -200,16 +221,16 @@ public class UnitTable {
             if (key.getFaction().isActiveInYear(key.getYear())) {
 
                 List<TableEntry> table = RATGenerator.getInstance()
-                                               .generateTable(key.getFaction(),
-                                                     key.getUnitType(),
-                                                     key.getYear(),
-                                                     key.getRating(),
-                                                     key.getWeightClasses(),
-                                                     key.getNetworkMask(),
-                                                     key.getMovementModes(),
-                                                     key.getRoles(),
-                                                     key.getRoleStrictness(),
-                                                     key.getDeployingFaction());
+                      .generateTable(key.getFaction(),
+                            key.getUnitType(),
+                            key.getYear(),
+                            key.getRating(),
+                            key.getWeightClasses(),
+                            key.getNetworkMask(),
+                            key.getMovementModes(),
+                            key.getRoles(),
+                            key.getRoleStrictness(),
+                            key.getDeployingFaction());
                 Collections.sort(table);
 
                 table.forEach(te -> {

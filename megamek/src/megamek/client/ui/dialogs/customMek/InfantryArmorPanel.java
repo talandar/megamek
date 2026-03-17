@@ -24,6 +24,11 @@
  *
  * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
  * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
 package megamek.client.ui.dialogs.customMek;
 
@@ -42,12 +47,13 @@ import javax.swing.JTextField;
 import megamek.client.ui.GBC;
 import megamek.client.ui.Messages;
 import megamek.codeUtilities.MathUtility;
-import megamek.common.Entity;
-import megamek.common.EquipmentType;
-import megamek.common.Infantry;
-import megamek.common.MiscType;
 import megamek.common.SimpleTechLevel;
+import megamek.common.equipment.EquipmentType;
+import megamek.common.equipment.MiscType;
+import megamek.common.equipment.enums.MiscTypeFlag;
 import megamek.common.options.OptionsConstants;
+import megamek.common.units.Entity;
+import megamek.common.units.Infantry;
 
 public class InfantryArmorPanel extends JPanel {
     @Serial
@@ -90,39 +96,38 @@ public class InfantryArmorPanel extends JPanel {
 
         GridBagLayout gridBagLayout = new GridBagLayout();
         setLayout(gridBagLayout);
-        add(labArmor, GBC.std());
-        add(cbArmorKit, GBC.eol());
-        add(labDivisor, GBC.std());
-        add(fldDivisor, GBC.eol());
-        add(labEncumber, GBC.std());
-        add(chEncumber, GBC.eol());
-        add(labSpaceSuit, GBC.std());
-        add(chSpaceSuit, GBC.eol());
-        add(labDEST, GBC.std());
-        add(chDEST, GBC.eol());
-        add(labSneakCamo, GBC.std());
-        add(chSneakCamo, GBC.eol());
-        add(labSneakIR, GBC.std());
-        add(chSneakIR, GBC.eol());
-        add(labSneakECM, GBC.std());
-        add(chSneakECM, GBC.eol());
-        add(Box.createVerticalStrut(10), GBC.eol());
-        add(labSpec, GBC.eol());
-
-        for (JCheckBox spec : chSpecs) {
-            add(spec, GBC.eol());
-        }
-
         SimpleTechLevel gameTechLevel = SimpleTechLevel.getGameTechLevel(entity.getGame());
+        if (gameTechLevel != SimpleTechLevel.STANDARD &&
+              gameTechLevel != SimpleTechLevel.INTRO) {
+            add(labArmor, GBC.std());
+            add(cbArmorKit, GBC.eol());
+            add(labDivisor, GBC.std());
+            add(fldDivisor, GBC.eol());
+            add(labEncumber, GBC.std());
+            add(chEncumber, GBC.eol());
+            add(labSpaceSuit, GBC.std());
+            add(chSpaceSuit, GBC.eol());
+            add(labDEST, GBC.std());
+            add(chDEST, GBC.eol());
+            add(labSneakCamo, GBC.std());
+            add(chSneakCamo, GBC.eol());
+            add(labSneakIR, GBC.std());
+            add(chSneakIR, GBC.eol());
+            add(labSneakECM, GBC.std());
+            add(chSneakECM, GBC.eol());
+        }
+        
         int year = entity.getGame().getOptions().intOption("year");
 
+        // If the rules level isn't at least Advanced, these won't be displayed, but it will iterate them still to 
+        // avoid potential issues.
         for (EquipmentType et : MiscType.allTypes()) {
             if (et.hasFlag(MiscType.F_ARMOR_KIT) &&
-                      et.isLegal(year,
-                            gameTechLevel,
-                            entity.isClan(),
-                            entity.isMixedTech(),
-                            entity.getGame().getOptions().booleanOption(OptionsConstants.ALLOWED_SHOW_EXTINCT))) {
+                  et.isLegal(year,
+                        gameTechLevel,
+                        entity.isClan(),
+                        entity.isMixedTech(),
+                        entity.getGame().getOptions().booleanOption(OptionsConstants.ALLOWED_SHOW_EXTINCT))) {
                 armorKits.add(et);
             }
         }
@@ -152,9 +157,12 @@ public class InfantryArmorPanel extends JPanel {
             armorStateChanged();
             updateArmorValues();
         });
-
+        add(Box.createVerticalStrut(10), GBC.eol());
+        add(labSpec, GBC.eol());
         chDEST.addItemListener(e -> armorStateChanged());
-
+        for (JCheckBox spec : chSpecs) {
+            add(spec, GBC.eol());
+        }
         for (int i = 0; i < Infantry.NUM_SPECIALIZATIONS; i++) {
             int spec = 1 << i;
             chSpecs.get(i).setSelected(infantry.hasSpecialization(spec));
@@ -175,12 +183,12 @@ public class InfantryArmorPanel extends JPanel {
         if (cbArmorKit.getSelectedIndex() > 0) {
             EquipmentType kit = armorKits.get(cbArmorKit.getSelectedIndex() - 1);
             fldDivisor.setText(Double.toString(((MiscType) kit).getDamageDivisor()));
-            chEncumber.setSelected((kit.getSubType() & MiscType.S_ENCUMBERING) != 0);
-            chSpaceSuit.setSelected((kit.getSubType() & MiscType.S_SPACE_SUIT) != 0);
-            chDEST.setSelected((kit.getSubType() & MiscType.S_DEST) != 0);
-            chSneakCamo.setSelected((kit.getSubType() & MiscType.S_SNEAK_CAMO) != 0);
-            chSneakIR.setSelected((kit.getSubType() & MiscType.S_SNEAK_IR) != 0);
-            chSneakECM.setSelected((kit.getSubType() & MiscType.S_SNEAK_ECM) != 0);
+            chEncumber.setSelected(kit.hasFlag(MiscTypeFlag.S_ENCUMBERING));
+            chSpaceSuit.setSelected(kit.hasFlag(MiscTypeFlag.S_SPACE_SUIT));
+            chDEST.setSelected(kit.hasFlag(MiscTypeFlag.S_DEST));
+            chSneakCamo.setSelected(kit.hasFlag(MiscTypeFlag.S_SNEAK_CAMO));
+            chSneakIR.setSelected(kit.hasFlag(MiscTypeFlag.S_SNEAK_IR));
+            chSneakECM.setSelected(kit.hasFlag(MiscTypeFlag.S_SNEAK_ECM));
         }
     }
 
@@ -189,7 +197,7 @@ public class InfantryArmorPanel extends JPanel {
             infantry.setArmorKit(armorKits.get(cbArmorKit.getSelectedIndex() - 1));
         } else {
             infantry.setArmorKit(null);
-            infantry.setArmorDamageDivisor(MathUtility.parseDouble(fldDivisor.getText(), 0.0));
+            infantry.setCustomArmorDamageDivisor(MathUtility.parseDouble(fldDivisor.getText(), 0.0));
             infantry.setArmorEncumbering(chEncumber.isSelected());
             infantry.setSpaceSuit(chSpaceSuit.isSelected());
             infantry.setDEST(chDEST.isSelected());

@@ -24,6 +24,11 @@
  *
  * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
  * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
 package megamek.client.ui.dialogs.customMek;
 
@@ -37,14 +42,14 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 
 import megamek.client.ui.GBC;
-import megamek.common.BattleArmor;
 import megamek.common.CriticalSlot;
-import megamek.common.Entity;
-import megamek.common.EquipmentType;
-import megamek.common.LocationFullException;
-import megamek.common.Mounted;
-import megamek.common.WeaponType;
+import megamek.common.battleArmor.BattleArmor;
+import megamek.common.equipment.EquipmentType;
+import megamek.common.equipment.Mounted;
 import megamek.common.equipment.WeaponMounted;
+import megamek.common.equipment.WeaponType;
+import megamek.common.exceptions.LocationFullException;
+import megamek.common.units.Entity;
 import megamek.logging.MMLogger;
 
 /**
@@ -86,7 +91,7 @@ public class APWeaponChoicePanel extends JPanel {
             WeaponType weaponType = it.next();
             comboChoices.addItem(weaponType.getName());
             if ((equipmentType != null) &&
-                      Objects.equals(weaponType.getInternalName(), equipmentType.getInternalName())) {
+                  Objects.equals(weaponType.getInternalName(), equipmentType.getInternalName())) {
                 comboChoices.setSelectedIndex(x);
             }
         }
@@ -131,12 +136,12 @@ public class APWeaponChoicePanel extends JPanel {
             // issues
             for (int location = 0; location < entity.locations(); location++) {
                 for (int locationCritical = 0;
-                      locationCritical < entity.getNumberOfCriticals(location);
+                      locationCritical < entity.getNumberOfCriticalSlots(location);
                       locationCritical++) {
                     CriticalSlot criticalSlot = entity.getCritical(location, locationCritical);
                     if (criticalSlot != null &&
-                              criticalSlot.getMount() != null &&
-                              criticalSlot.getMount().equals(mAPMountedLinked)) {
+                          criticalSlot.getMount() != null &&
+                          criticalSlot.getMount().equals(mAPMountedLinked)) {
                         entity.setCritical(location, locationCritical, null);
                     }
                 }

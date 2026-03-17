@@ -1,17 +1,36 @@
 /*
- * MegaMek -
- * Copyright (C) 2017 - The MegaMek Team
+ * Copyright (C) 2017-2026 The MegaMek Team. All Rights Reserved.
  *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms of the GNU General Public License as published by the Free
- *  Software Foundation; either version 2 of the License, or (at your option)
- *  any later version.
+ * This file is part of MegaMek.
  *
- *  This program is distributed in the hope that it will be useful, but
- *  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- *  or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
- *  for more details.
+ * MegaMek is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MegaMek is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
+
 package megamek.common.verifier;
 
 import java.util.HashMap;
@@ -19,12 +38,23 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-import megamek.common.*;
-import megamek.common.AmmoType.AmmoTypeEnum;
+import megamek.common.CriticalSlot;
+import megamek.common.bays.Bay;
 import megamek.common.equipment.AmmoMounted;
+import megamek.common.equipment.AmmoType;
+import megamek.common.equipment.AmmoType.AmmoTypeEnum;
 import megamek.common.equipment.ArmorType;
+import megamek.common.equipment.EquipmentType;
+import megamek.common.equipment.MiscType;
+import megamek.common.equipment.Mounted;
 import megamek.common.equipment.WeaponMounted;
+import megamek.common.equipment.WeaponType;
+import megamek.common.equipment.enums.MiscTypeFlag;
+import megamek.common.interfaces.ITechManager;
 import megamek.common.options.OptionsConstants;
+import megamek.common.units.Aero;
+import megamek.common.units.Entity;
+import megamek.common.units.SmallCraft;
 import megamek.common.util.StringUtil;
 
 /**
@@ -36,14 +66,14 @@ public class TestSmallCraft extends TestAero {
 
     // Indices used to specify firing arcs with aliases for AeroDyne and spheroid
     public static final int ARC_NOSE = SmallCraft.LOC_NOSE;
-    public static final int ARC_LWING = SmallCraft.LOC_LWING;
-    public static final int ARC_RWING = SmallCraft.LOC_RWING;
+    public static final int ARC_LEFT_WING = SmallCraft.LOC_LEFT_WING;
+    public static final int ARC_RIGHT_WING = SmallCraft.LOC_RIGHT_WING;
     public static final int ARC_AFT = SmallCraft.LOC_AFT;
     public static final int REAR_ARC_OFFSET = SmallCraft.LOC_HULL;
-    public static final int ARC_FWD_LEFT = SmallCraft.LOC_LWING;
-    public static final int ARC_FWD_RIGHT = SmallCraft.LOC_RWING;
-    public static final int ARC_AFT_LEFT = SmallCraft.LOC_LWING + REAR_ARC_OFFSET;
-    public static final int ARC_AFT_RIGHT = SmallCraft.LOC_RWING + REAR_ARC_OFFSET;
+    public static final int ARC_FWD_LEFT = SmallCraft.LOC_LEFT_WING;
+    public static final int ARC_FWD_RIGHT = SmallCraft.LOC_RIGHT_WING;
+    public static final int ARC_AFT_LEFT = SmallCraft.LOC_LEFT_WING + REAR_ARC_OFFSET;
+    public static final int ARC_AFT_RIGHT = SmallCraft.LOC_RIGHT_WING + REAR_ARC_OFFSET;
 
     private final SmallCraft smallCraft;
 
@@ -56,15 +86,41 @@ public class TestSmallCraft extends TestAero {
      */
     public static List<ArmorType> legalArmorsFor(ITechManager techManager) {
         return ArmorType.allArmorTypes()
-                     .stream()
-                     .filter(at -> at.hasFlag(MiscType.F_SC_EQUIPMENT) && techManager.isLegal(at))
-                     .collect(Collectors.toList());
+              .stream()
+              .filter(at -> at.hasFlag(MiscType.F_SC_EQUIPMENT) && techManager.isLegal(at))
+              .collect(Collectors.toList());
     }
 
-    public static int maxArmorPoints(SmallCraft sc) {
-        ArmorType a = ArmorType.forEntity(sc);
-        return (int) Math.floor(a.getPointsPerTon(sc) * maxArmorWeight(sc) +
-                                      sc.getOSI() * (sc.isPrimitive() ? 2.64 : 4));
+    /**
+     * Returns the maximum number of total (all locations summed) armor points that the given vessel (DS/SC) can have,
+     * including free armor points it receives from its SI and modified for primitive armor, if appropriate. See TM
+     * p.191, IO:AE p.119-122.
+     *
+     * @param vessel The SC/DS to compute bonus armor for
+     *
+     * @return The total number of armor points allowed to the vessel
+     */
+    public static int maxArmorPoints(SmallCraft vessel) {
+        double pointsPerTon = ArmorType.forEntity(vessel).getPointsPerTon();
+        int baseArmor = (int) (pointsPerTon * maxArmorWeight(vessel) + getSIBonusArmorPoints(vessel));
+        if (vessel.isPrimitive()) {
+            return (int) (baseArmor * 0.66);
+        } else {
+            return baseArmor;
+        }
+    }
+
+    /**
+     * Returns the number of free additional armor points provided for SmallCraft and DropShips based on their
+     * structural integrity (for primitive craft, *without* the 0.66 primitive adjustment factor). See TM p.191,
+     * IO:AE p.119-125.
+     *
+     * @param smallCraft The SC/DS to compute free armor for
+     *
+     * @return The total number of extra armor points received for SI (disregarding primitive adjustment)
+     */
+    static int getSIBonusArmorPointsForSC(SmallCraft smallCraft) {
+        return (smallCraft.locations() - 1) * smallCraft.getOSI();
     }
 
     /**
@@ -72,9 +128,9 @@ public class TestSmallCraft extends TestAero {
      */
     public static double maxArmorWeight(SmallCraft smallCraft) {
         if (smallCraft.isSpheroid()) {
-            return floor(smallCraft.getOSI() * 3.6, Ceil.HALFTON);
+            return floor(smallCraft.getOSI() * 3.6, Ceil.HALF_TON);
         } else {
-            return floor(smallCraft.getOSI() * 4.5, Ceil.HALFTON);
+            return floor(smallCraft.getOSI() * 4.5, Ceil.HALF_TON);
         }
     }
 
@@ -115,7 +171,7 @@ public class TestSmallCraft extends TestAero {
         for (int arc = 0; arc < arcs; arc++) {
             int excess = (weaponsPerArc[arc] - 1) / slotsPerArc(sc);
             if (excess > 0) {
-                retVal[arc] = ceil(excess * weaponTonnage[arc] / 10.0, Ceil.HALFTON);
+                retVal[arc] = ceil(excess * weaponTonnage[arc] / 10.0, Ceil.HALF_TON);
             }
             if (hasNC3) {
                 retVal[arc] *= 2;
@@ -135,7 +191,8 @@ public class TestSmallCraft extends TestAero {
      *
      * @return The weight of the engine in tons
      */
-    public static double calculateEngineTonnage(boolean clan, double tonnage, int desiredSafeThrust, boolean dropship, int year) {
+    public static double calculateEngineTonnage(boolean clan, double tonnage, int desiredSafeThrust, boolean dropship,
+          int year) {
         double multiplier;
         if (clan) {
             multiplier = 0.061;
@@ -144,7 +201,7 @@ public class TestSmallCraft extends TestAero {
         } else {
             multiplier = smallCraftEngineMultiplier(year);
         }
-        return ceil(tonnage * desiredSafeThrust * multiplier, Ceil.HALFTON);
+        return ceil(tonnage * desiredSafeThrust * multiplier, Ceil.HALF_TON);
     }
 
     public static int weightFreeHeatSinks(SmallCraft sc) {
@@ -285,7 +342,7 @@ public class TestSmallCraft extends TestAero {
         if (smallCraft.hasETypeFlag(Entity.ETYPE_DROPSHIP)) {
             return ceil(smallCraft.getWeight() * dropshipControlMultiplier(year), Ceil.TON);
         } else {
-            return ceil(smallCraft.getWeight() * smallCraftControlMultiplier(year), Ceil.HALFTON);
+            return ceil(smallCraft.getWeight() * smallCraftControlMultiplier(year), Ceil.HALF_TON);
         }
     }
 
@@ -301,14 +358,14 @@ public class TestSmallCraft extends TestAero {
     @Override
     public String printWeightEngine() {
         return StringUtil.makeLength("Engine: ", getPrintSize() - 5) +
-                     TestEntity.makeWeightString(getWeightEngine()) +
-                     "\n";
+              TestEntity.makeWeightString(getWeightEngine()) +
+              "\n";
     }
 
     @Override
     public double getWeightFuel() {
         // Add 2% for pumps and round up to the half ton
-        return ceil(smallCraft.getFuelTonnage() * 1.02, Ceil.HALFTON);
+        return ceil(smallCraft.getFuelTonnage() * 1.02, Ceil.HALF_TON);
     }
 
     @Override
@@ -405,8 +462,8 @@ public class TestSmallCraft extends TestAero {
     @Override
     public String printWeightControls() {
         return StringUtil.makeLength("Control Systems:", getPrintSize() - 5) +
-                     makeWeightString(getWeightControls()) +
-                     "\n";
+              makeWeightString(getWeightControls()) +
+              "\n";
     }
 
     @Override
@@ -500,9 +557,9 @@ public class TestSmallCraft extends TestAero {
         correct &= !hasIllegalEquipmentCombinations(buff);
         correct &= correctHeatSinks(buff);
         correct &= correctCrew(buff);
-        correct &= correctCriticals(buff);
+        correct &= correctCriticalSlots(buff);
         if (getEntity().hasQuirk(OptionsConstants.QUIRK_NEG_ILLEGAL_DESIGN) ||
-                  getEntity().canonUnitWithInvalidBuild()) {
+              getEntity().canonUnitWithInvalidBuild()) {
             correct = true;
         }
         return correct;
@@ -566,8 +623,8 @@ public class TestSmallCraft extends TestAero {
         Map<EquipmentType, Integer> rightFwd = new HashMap<>();
         Map<EquipmentType, Integer> rightAft = new HashMap<>();
         MiscTypeFlag typeFlag = smallCraft.hasETypeFlag(Entity.ETYPE_DROPSHIP) ?
-                                      MiscType.F_DS_EQUIPMENT :
-                                      MiscType.F_SC_EQUIPMENT;
+              MiscType.F_DS_EQUIPMENT :
+              MiscType.F_SC_EQUIPMENT;
         for (Mounted<?> m : smallCraft.getEquipment()) {
             if (m.getType() instanceof MiscType) {
                 if (!m.getType().hasFlag(typeFlag) && !m.getType().hasFlag(MiscType.F_SINGLE_HEX_ECM)) {
@@ -575,18 +632,18 @@ public class TestSmallCraft extends TestAero {
                     illegal = true;
                 }
             } else if ((m.getType() instanceof AmmoType) &&
-                             (smallCraft.hasETypeFlag(Entity.ETYPE_DROPSHIP)) &&
-                             (((AmmoType) m.getType()).getAmmoType() == AmmoType.AmmoTypeEnum.COOLANT_POD)) {
+                  (smallCraft.hasETypeFlag(Entity.ETYPE_DROPSHIP)) &&
+                  (((AmmoType) m.getType()).getAmmoType() == AmmoType.AmmoTypeEnum.COOLANT_POD)) {
                 buff.append("Cannot mount ").append(m.getType().getName()).append("\n");
                 illegal = true;
             } else if (m.getType() instanceof WeaponType) {
-                if (m.getLocation() == SmallCraft.LOC_LWING) {
+                if (m.getLocation() == SmallCraft.LOC_LEFT_WING) {
                     if (m.isRearMounted()) {
                         leftAft.merge(m.getType(), 1, Integer::sum);
                     } else {
                         leftFwd.merge(m.getType(), 1, Integer::sum);
                     }
-                } else if (m.getLocation() == SmallCraft.LOC_RWING) {
+                } else if (m.getLocation() == SmallCraft.LOC_RIGHT_WING) {
                     if (m.isRearMounted()) {
                         rightAft.merge(m.getType(), 1, Integer::sum);
                     } else {
@@ -712,14 +769,14 @@ public class TestSmallCraft extends TestAero {
         buff.append("Intro year: ").append(getEntity().getYear()).append("\n");
         buff.append(printSource());
         buff.append(printShortMovement());
-        if (correctWeight(buff, true, true)) {
+        if (correctWeight(buff, false, false)) {
             buff.append("Weight: ").append(getWeight()).append(" (").append(calculateWeight()).append(")\n");
         }
         buff.append(printWeightCalculation()).append("\n");
         buff.append(printArmorPlacement());
         correctArmor(buff);
         buff.append(printLocations());
-        correctCriticals(buff);
+        correctCriticalSlots(buff);
         printFailedEquipment(buff);
         return buff;
     }
@@ -748,17 +805,17 @@ public class TestSmallCraft extends TestAero {
     @Override
     public String printWeightCalculation() {
         return printWeightEngine() +
-                     printWeightControls() +
-                     printWeightFuel() +
-                     printWeightHeatSinks() +
-                     printWeightArmor() +
-                     printWeightMisc() +
-                     printWeightCarryingSpace() +
-                     printWeightQuarters() +
-                     "Equipment:\n" +
-                     printMiscEquip() +
-                     printWeapon() +
-                     printAmmo();
+              printWeightControls() +
+              printWeightFuel() +
+              printWeightHeatSinks() +
+              printWeightArmor() +
+              printWeightMisc() +
+              printWeightCarryingSpace() +
+              printWeightQuarters() +
+              "Equipment:\n" +
+              printMiscEquip() +
+              printWeapon() +
+              printAmmo();
     }
 
     @Override
@@ -768,10 +825,10 @@ public class TestSmallCraft extends TestAero {
             String locationName = getEntity().getLocationName(i);
             buff.append(locationName).append(":");
             buff.append("\n");
-            for (int j = 0; j < getEntity().getNumberOfCriticals(i); j++) {
+            for (int j = 0; j < getEntity().getNumberOfCriticalSlots(i); j++) {
                 CriticalSlot slot = getEntity().getCritical(i, j);
                 if (slot == null) {
-                    j = getEntity().getNumberOfCriticals(i);
+                    j = getEntity().getNumberOfCriticalSlots(i);
                 } else if (slot.getType() == CriticalSlot.TYPE_SYSTEM) {
                     buff.append(j).append(". UNKNOWN SYSTEM NAME");
                     buff.append("\n");

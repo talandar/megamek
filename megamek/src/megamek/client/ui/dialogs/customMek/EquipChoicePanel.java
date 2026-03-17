@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2003, 2004 Ben Mazur (bmazur@sev.org)
- * Copyright (C) 2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2012-2025 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -25,6 +25,11 @@
  *
  * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
  * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
  */
 package megamek.client.ui.dialogs.customMek;
 
@@ -52,16 +57,36 @@ import megamek.client.Client;
 import megamek.client.ui.GBC;
 import megamek.client.ui.Messages;
 import megamek.client.ui.clientGUI.ClientGUI;
-import megamek.common.*;
+import megamek.common.Configuration;
+import megamek.common.SimpleTechLevel;
+import megamek.common.TechConstants;
+import megamek.common.battleArmor.BattleArmor;
 import megamek.common.equipment.AmmoMounted;
+import megamek.common.equipment.AmmoType;
+import megamek.common.equipment.EquipmentType;
 import megamek.common.equipment.MiscMounted;
+import megamek.common.equipment.MiscType;
+import megamek.common.equipment.Mounted;
 import megamek.common.equipment.WeaponMounted;
+import megamek.common.equipment.WeaponType;
+import megamek.common.equipment.enums.AmmoTypeFlag;
+import megamek.common.game.Game;
 import megamek.common.options.IGameOptions;
 import megamek.common.options.OptionsConstants;
+import megamek.common.units.Aero;
+import megamek.common.units.Dropship;
+import megamek.common.units.Entity;
+import megamek.common.units.EntityWeightClass;
+import megamek.common.units.IBomber;
+import megamek.common.units.Infantry;
+import megamek.common.units.Mek;
+import megamek.common.units.ProtoMek;
 import megamek.common.util.fileUtils.MegaMekFile;
 import megamek.common.verifier.EntityVerifier;
 import megamek.common.verifier.TestBattleArmor;
 import megamek.common.weapons.infantry.InfantryWeapon;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /**
  * This class builds the Equipment Panel for use in MegaMek and MekHQ
@@ -73,6 +98,8 @@ import megamek.common.weapons.infantry.InfantryWeapon;
 public class EquipChoicePanel extends JPanel {
     @Serial
     private static final long serialVersionUID = 672299770230285567L;
+
+    private static final Logger LOGGER = LogManager.getLogger();
 
     private final Entity entity;
     private final List<MunitionChoicePanel> m_vMunitions = new ArrayList<>();
@@ -98,6 +125,8 @@ public class EquipChoicePanel extends JPanel {
     private final JPanel panWeaponAmmoSelector = new JPanel();
     private final ArrayList<RapidFireMGPanel> m_vMGs = new ArrayList<>();
     private final JPanel panRapidFireMGs = new JPanel();
+    private VRTChoicePanel panVRT;
+    private final JPanel panVRTContainer = new JPanel();
     private final ArrayList<MineChoicePanel> m_vMines = new ArrayList<>();
     private final JPanel panMines = new JPanel();
     private final JPanel panBombs = new JPanel();
@@ -109,6 +138,9 @@ public class EquipChoicePanel extends JPanel {
     private final JCheckBox chCondEjectFuel = new JCheckBox();
     private final JCheckBox chCondEjectSIDest = new JCheckBox();
     private final JCheckBox chSearchlight = new JCheckBox();
+    private final JCheckBox chDNICockpitMod = new JCheckBox();
+    private final JCheckBox chEICockpit = new JCheckBox();
+    private final JCheckBox chDamageInterruptCircuit = new JCheckBox();
     private final JComboBox<String> choC3 = new JComboBox<>();
     ClientGUI clientgui;
     Client client;
@@ -140,7 +172,7 @@ public class EquipChoicePanel extends JPanel {
 
             // Conditional Ejections
             if (game.getOptions().booleanOption(OptionsConstants.RPG_CONDITIONAL_EJECTION) &&
-                      mek.hasEjectSeat()) {
+                  mek.hasEjectSeat()) {
                 add(labCondEjectAmmo, GBC.std());
                 add(chCondEjectAmmo, GBC.eol());
                 chCondEjectAmmo.setSelected(mek.isCondEjectAmmo());
@@ -172,7 +204,7 @@ public class EquipChoicePanel extends JPanel {
 
             // Conditional Ejections
             if (game.getOptions().booleanOption(OptionsConstants.RPG_CONDITIONAL_EJECTION) &&
-                      aero.hasEjectSeat()) {
+                  aero.hasEjectSeat()) {
                 add(labCondEjectAmmo, GBC.std());
                 add(chCondEjectAmmo, GBC.eol());
                 chCondEjectAmmo.setSelected(aero.isCondEjectAmmo());
@@ -224,9 +256,9 @@ public class EquipChoicePanel extends JPanel {
                 }
             }
             String freeWeight = Messages.getString("CustomMekDialog.freeWeight") +
-                                      String.format(": %1$.3f/%2$.3f",
-                                            maxTrooperWeight,
-                                            battleArmor.getTrooperWeight());
+                  String.format(": %1$.3f/%2$.3f",
+                        maxTrooperWeight,
+                        battleArmor.getTrooperWeight());
 
             setupMEAdaptors(freeWeight);
             add(panMEAdaptors, GBC.eop().anchor(GridBagConstraints.CENTER));
@@ -234,7 +266,7 @@ public class EquipChoicePanel extends JPanel {
 
         // Can't set up munitions on infantry.
         if (!((entity instanceof Infantry) && !((Infantry) entity).hasFieldWeapon()) ||
-                  (entity instanceof BattleArmor)) {
+              (entity instanceof BattleArmor)) {
             setupMunitions();
             panMunitions.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEmptyBorder(),
                   Messages.getString("CustomMekDialog.MunitionsPanelTitle"),
@@ -259,10 +291,16 @@ public class EquipChoicePanel extends JPanel {
         }
 
         // Set up rapid fire mg; per errata infantry of any kind cannot use them
-        if (game.getOptions().booleanOption(OptionsConstants.ADVCOMBAT_TACOPS_BURST) &&
-                  !(entity instanceof Infantry)) {
+        if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_COMBAT_TAC_OPS_BURST) &&
+              !(entity instanceof Infantry)) {
             setupRapidFireMGs();
             add(panRapidFireMGs, GBC.eop().anchor(GridBagConstraints.CENTER));
+        }
+
+        // Set up Variable Range Targeting mode selection
+        if (entity.hasVariableRangeTargeting()) {
+            setupVRT();
+            add(panVRTContainer, GBC.eop().anchor(GridBagConstraints.CENTER));
         }
 
         // set up infantry armor
@@ -273,14 +311,84 @@ public class EquipChoicePanel extends JPanel {
 
         // Set up searchlight
         if (!entity.getsAutoExternalSearchlight() &&
-                  client.getGame().getPlanetaryConditions().getLight().isDuskOrFullMoonOrMoonlessOrPitchBack()) {
+              client.getGame().getPlanetaryConditions().getLight().isDuskOrFullMoonOrMoonlessOrPitchBack()) {
             JLabel labSearchlight = new JLabel(Messages.getString("CustomMekDialog.labSearchlight"),
                   SwingConstants.RIGHT);
             add(labSearchlight, GBC.std());
             add(chSearchlight, GBC.eol());
             chSearchlight.setSelected(entity.hasSearchlight() ||
-                                            entity.hasQuirk(OptionsConstants.QUIRK_POS_SEARCHLIGHT));
+                  entity.hasQuirk(OptionsConstants.QUIRK_POS_SEARCHLIGHT));
             chSearchlight.setEnabled(!entity.hasQuirk(OptionsConstants.QUIRK_POS_SEARCHLIGHT));
+        }
+
+        // Set up DNI Cockpit Modification (IO p.83)
+        // Only show when tracking neural interface hardware is enabled
+        // DNI is Inner Sphere tech (E/X-X-E-F) - not available for pure Clan units
+        if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_TRACK_NEURAL_INTERFACE_HARDWARE)) {
+            // DNI cockpit mod is available for Meks, Tanks, Fighters, BA, and Support Vehicles
+            // Must be IS, Mixed IS, or Mixed Clan (not pure Clan)
+            boolean validUnitType = entity.isMek() || entity.isCombatVehicle() || entity.isFighter()
+                  || entity.isSupportVehicle() || (entity instanceof BattleArmor);
+            boolean validTechBase = !entity.isClan() || entity.isMixedTech();
+            if (validUnitType && validTechBase) {
+                // Check game year against equipment introduction date
+                EquipmentType dniEquipment = EquipmentType.get("DNICockpitModification");
+                int gameYear = game.getOptions().intOption(OptionsConstants.ALLOWED_YEAR);
+                int dniIntroYear = (dniEquipment != null) ? dniEquipment.getIntroductionDate(false) : 3052;
+                if (gameYear >= dniIntroYear) {
+                    JLabel labDNICockpitMod = new JLabel(Messages.getString("CustomMekDialog.labDNICockpitMod"),
+                          SwingConstants.RIGHT);
+                    add(labDNICockpitMod, GBC.std());
+                    add(chDNICockpitMod, GBC.eol());
+                    // Auto-select if pilot has DNI implant (smart detection)
+                    boolean hasHardware = entity.hasDNICockpitMod();
+                    boolean hasImplant = entity.hasDNIImplant();
+                    chDNICockpitMod.setSelected(hasHardware || hasImplant);
+                }
+            }
+        }
+
+        // Set up EI Interface (IO p.69)
+        // Only show when tracking neural interface hardware is enabled
+        // EI is Clan tech (F/X-X-D-D) - not available for pure IS units
+        if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_TRACK_NEURAL_INTERFACE_HARDWARE)) {
+            // EI Interface is available for Meks, BA, and ProtoMeks
+            // Must be Clan, Mixed Clan, or Mixed IS (not pure IS)
+            boolean validUnitType = entity.isMek() || (entity instanceof BattleArmor) || entity.isProtoMek();
+            boolean validTechBase = entity.isClan() || entity.isMixedTech();
+            if (validUnitType && validTechBase) {
+                // Check game year against equipment introduction date
+                EquipmentType eiEquipment = EquipmentType.get("EIInterface");
+                int gameYear = game.getOptions().intOption(OptionsConstants.ALLOWED_YEAR);
+                int eiIntroYear = (eiEquipment != null) ? eiEquipment.getIntroductionDate(true) : 3040;
+                if (gameYear >= eiIntroYear) {
+                    JLabel labEICockpit = new JLabel(Messages.getString("CustomMekDialog.labEICockpit"),
+                          SwingConstants.RIGHT);
+                    add(labEICockpit, GBC.std());
+                    add(chEICockpit, GBC.eol());
+                    // Auto-select if pilot has EI implant (smart detection)
+                    boolean hasHardware = entity.hasEiCockpit();
+                    boolean hasImplant = entity.hasAbility(OptionsConstants.MD_EI_IMPLANT);
+                    chEICockpit.setSelected(hasHardware || hasImplant);
+                }
+            }
+        }
+
+        // Set up Damage Interrupt Circuit (IO p.39) - BattleMeks and IndustrialMeks only, IS or Mixed tech
+        if ((entity instanceof Mek mek) && ((!entity.isClan()) || (entity.isMixedTech()))) {
+            EquipmentType dicEquipment = EquipmentType.get("DamageInterruptCircuit");
+            if (dicEquipment != null) {
+                int gameYear = game.getOptions().intOption(OptionsConstants.ALLOWED_YEAR);
+                int dicIntroYear = dicEquipment.getIntroductionDate(false); // IS tech
+                if (gameYear >= dicIntroYear) {
+                    JLabel labDamageInterruptCircuit = new JLabel(
+                          Messages.getString("CustomMekDialog.labDamageInterruptCircuit"),
+                          SwingConstants.RIGHT);
+                    add(labDamageInterruptCircuit, GBC.std());
+                    add(chDamageInterruptCircuit, GBC.eol());
+                    chDamageInterruptCircuit.setSelected(mek.hasDamageInterruptCircuit());
+                }
+            }
         }
 
         // Set up mines
@@ -407,7 +515,7 @@ public class EquipChoicePanel extends JPanel {
         // Weapons that can be used in an Armored Glove
         ArrayList<WeaponType> agWeaponTypes = new ArrayList<>(100);
         Enumeration<EquipmentType> allTypes = EquipmentType.getAllTypes();
-        int gameYear = 0;
+        int gameYear;
         SimpleTechLevel legalLevel;
         if (clientgui == null) {
             gameYear = client.getGame().getOptions().intOption(OptionsConstants.ALLOWED_YEAR);
@@ -435,15 +543,15 @@ public class EquipChoicePanel extends JPanel {
 
             // Check to see if we've got a valid infantry weapon
             if (infantryWeapon.hasFlag(WeaponType.F_INFANTRY) &&
-                      !infantryWeapon.hasFlag(WeaponType.F_INF_POINT_BLANK) &&
-                      !infantryWeapon.hasFlag(WeaponType.F_INF_ARCHAIC) &&
-                      !infantryWeapon.hasFlag(WeaponType.F_INF_SUPPORT)) {
+                  !infantryWeapon.hasFlag(WeaponType.F_INF_POINT_BLANK) &&
+                  !infantryWeapon.hasFlag(WeaponType.F_INF_ARCHAIC) &&
+                  !infantryWeapon.hasFlag(WeaponType.F_INF_SUPPORT)) {
                 apWeaponTypes.add(infantryWeapon);
             }
             if (infantryWeapon.hasFlag(WeaponType.F_INFANTRY) &&
-                      !infantryWeapon.hasFlag(WeaponType.F_INF_POINT_BLANK) &&
-                      !infantryWeapon.hasFlag(WeaponType.F_INF_ARCHAIC) &&
-                      (infantryWeapon.getCrew() < 2)) {
+                  !infantryWeapon.hasFlag(WeaponType.F_INF_POINT_BLANK) &&
+                  !infantryWeapon.hasFlag(WeaponType.F_INF_ARCHAIC) &&
+                  (infantryWeapon.getCrew() < 2)) {
                 agWeaponTypes.add(infantryWeapon);
             }
         }
@@ -514,9 +622,9 @@ public class EquipChoicePanel extends JPanel {
                 continue;
             }
             Mounted<?> currentManipulator;
-            if (m.getBaMountLoc() == BattleArmor.MOUNT_LOC_LARM) {
+            if (m.getBaMountLoc() == BattleArmor.MOUNT_LOC_LEFT_ARM) {
                 currentManipulator = ((BattleArmor) entity).getLeftManipulator();
-            } else if (m.getBaMountLoc() == BattleArmor.MOUNT_LOC_RARM) {
+            } else if (m.getBaMountLoc() == BattleArmor.MOUNT_LOC_RIGHT_ARM) {
                 currentManipulator = ((BattleArmor) entity).getRightManipulator();
             } else {
                 // We can only have MEA's in an arm
@@ -562,12 +670,12 @@ public class EquipChoicePanel extends JPanel {
             // don't allow ammo switching of most things for Aerospace allow only MML, ATM, and NARC. LRM/SRM can
             // switch between Artemis and standard, but not other munitions. Same with MRM.
             if ((entity instanceof Aero) &&
-                      !((at.getAmmoType() == AmmoType.AmmoTypeEnum.MML) ||
-                              (at.getAmmoType() == AmmoType.AmmoTypeEnum.SRM) ||
-                              (at.getAmmoType() == AmmoType.AmmoTypeEnum.LRM) ||
-                              (at.getAmmoType() == AmmoType.AmmoTypeEnum.MRM) ||
-                              (at.getAmmoType() == AmmoType.AmmoTypeEnum.ATM) ||
-                              (at.getAmmoType() == AmmoType.AmmoTypeEnum.IATM))) {
+                  !((at.getAmmoType() == AmmoType.AmmoTypeEnum.MML) ||
+                        (at.getAmmoType() == AmmoType.AmmoTypeEnum.SRM) ||
+                        (at.getAmmoType() == AmmoType.AmmoTypeEnum.LRM) ||
+                        (at.getAmmoType() == AmmoType.AmmoTypeEnum.MRM) ||
+                        (at.getAmmoType() == AmmoType.AmmoTypeEnum.ATM) ||
+                        (at.getAmmoType() == AmmoType.AmmoTypeEnum.IATM))) {
                 continue;
             }
 
@@ -579,8 +687,8 @@ public class EquipChoicePanel extends JPanel {
 
             for (AmmoType atCheck : vAllTypes) {
                 if (entity.hasETypeFlag(Entity.ETYPE_AERO) &&
-                          !atCheck.canAeroUse(game.getOptions()
-                                                    .booleanOption(OptionsConstants.ADVAERORULES_AERO_ARTILLERY_MUNITIONS))) {
+                      !atCheck.canAeroUse(game.getOptions()
+                            .booleanOption(OptionsConstants.ADVANCED_AERO_RULES_AERO_ARTILLERY_MUNITIONS))) {
                     continue;
                 }
                 SimpleTechLevel legalLevel = SimpleTechLevel.getGameTechLevel(game);
@@ -595,33 +703,32 @@ public class EquipChoicePanel extends JPanel {
                     // This is the way MegaMek is intended to use tech levels.
                     boolean isClanAccessibleTech = atCheck.isClan() || atCheck.isMixedTech();
                     boolean isIsAccessibleTech = !atCheck.isClan() || atCheck.isMixedTech();
-                    boolean canUseThisAmmo = (canUseISAmmo && isIsAccessibleTech) || (canUseClanAmmo && isClanAccessibleTech);
+                    boolean canUseThisAmmo = (canUseISAmmo && isIsAccessibleTech) || (canUseClanAmmo
+                          && isClanAccessibleTech);
                     bTechMatch = atCheck.getStaticTechLevel().ordinal() <= legalLevel.ordinal() && canUseThisAmmo;
                 }
 
-                // If clan_ignore_eq_limits is unchecked, do NOT allow Clans to use IS-only ammo. "Incendiary"
-                // munition type gets removed here for reasons unknown.
+                // If clan_ignore_eq_limits is unchecked, do NOT allow Clans to use IS-only ammo.
                 EnumSet<AmmoType.Munitions> munitionsTypes = atCheck.getMunitionType();
-                munitionsTypes.remove(AmmoType.Munitions.M_INCENDIARY_LRM);
                 if (!gameOpts.booleanOption(OptionsConstants.ALLOWED_ALL_AMMO_MIXED_TECH) &&
-                          entity.isClan() &&
-                          atCheck.notAllowedByClanRules()) {
+                      entity.isClan() &&
+                      atCheck.notAllowedByClanRules()) {
                     bTechMatch = false;
                 }
 
                 if ((munitionsTypes.contains(AmmoType.Munitions.M_ARTEMIS_CAPABLE)) &&
-                          !entity.hasWorkingMisc(MiscType.F_ARTEMIS) &&
-                          !entity.hasWorkingMisc(MiscType.F_ARTEMIS_PROTO)) {
+                      !entity.hasWorkingMisc(MiscType.F_ARTEMIS) &&
+                      !entity.hasWorkingMisc(MiscType.F_ARTEMIS_PROTO)) {
                     continue;
                 }
                 if ((munitionsTypes.contains(AmmoType.Munitions.M_ARTEMIS_V_CAPABLE)) &&
-                          !entity.hasWorkingMisc(MiscType.F_ARTEMIS_V) &&
-                          !entity.hasWorkingMisc(MiscType.F_ARTEMIS_PROTO)) {
+                      !entity.hasWorkingMisc(MiscType.F_ARTEMIS_V) &&
+                      !entity.hasWorkingMisc(MiscType.F_ARTEMIS_PROTO)) {
                     continue;
                 }
 
                 if (!gameOpts.booleanOption(OptionsConstants.ADVANCED_MINEFIELDS) &&
-                          AmmoType.canDeliverMinefield(atCheck)) {
+                      AmmoType.canDeliverMinefield(atCheck)) {
                     continue;
                 }
 
@@ -632,29 +739,29 @@ public class EquipChoicePanel extends JPanel {
 
                 // When dealing with machine guns, ProtoMeks can only use proto-specific machine gun ammo
                 if ((entity instanceof ProtoMek) &&
-                          atCheck.hasFlag(AmmoType.F_MG) &&
-                          !atCheck.hasFlag(AmmoType.F_PROTOMEK)) {
+                      atCheck.hasFlag(AmmoType.F_MG) &&
+                      !atCheck.hasFlag(AmmoType.F_PROTOMEK)) {
                     continue;
                 }
 
                 if (Set.of(AmmoType.AmmoTypeEnum.LRM, AmmoType.AmmoTypeEnum.SRM).contains(atCheck.getAmmoType()) &&
-                          entity.isBattleArmor() &&
-                          !atCheck.hasFlag(AmmoTypeFlag.F_BATTLEARMOR)) {
+                      entity.isBattleArmor() &&
+                      !atCheck.hasFlag(AmmoTypeFlag.F_BATTLEARMOR)) {
                     continue;
                 }
 
                 // Battle Armor ammo can't be selected at all. All other ammo types need to match on rack size and tech.
                 if (bTechMatch &&
-                          (atCheck.getRackSize() == at.getRackSize()) &&
-                          (atCheck.hasFlag(AmmoType.F_BATTLEARMOR) == at.hasFlag(AmmoType.F_BATTLEARMOR)) &&
-                          (atCheck.hasFlag(AmmoType.F_ENCUMBERING) == at.hasFlag(AmmoType.F_ENCUMBERING)) &&
-                          (atCheck.getTonnage(entity) == at.getTonnage(entity))) {
+                      (atCheck.getRackSize() == at.getRackSize()) &&
+                      (atCheck.hasFlag(AmmoType.F_BATTLEARMOR) == at.hasFlag(AmmoType.F_BATTLEARMOR)) &&
+                      (atCheck.hasFlag(AmmoType.F_ENCUMBERING) == at.hasFlag(AmmoType.F_ENCUMBERING)) &&
+                      (atCheck.getTonnage(entity) == at.getTonnage(entity))) {
                     vTypes.add(atCheck);
                 }
             }
             if ((vTypes.isEmpty()) &&
-                      !client.getGame().getOptions().booleanOption(OptionsConstants.BASE_LOBBY_AMMO_DUMP) &&
-                      !client.getGame().getOptions().booleanOption(OptionsConstants.ADVCOMBAT_TACOPS_HOTLOAD)) {
+                  !client.getGame().getOptions().booleanOption(OptionsConstants.BASE_LOBBY_AMMO_DUMP) &&
+                  !client.getGame().getOptions().booleanOption(OptionsConstants.ADVANCED_COMBAT_TAC_OPS_HOT_LOAD)) {
                 continue;
             }
             MunitionChoicePanel munitionChoicePanel = new MunitionChoicePanel(ammoMounted,
@@ -692,8 +799,10 @@ public class EquipChoicePanel extends JPanel {
         panBombs.setLayout(gbl);
 
         int techLevel = Arrays.binarySearch(TechConstants.T_SIMPLE_NAMES,
-              client.getGame().getOptions().stringOption(OptionsConstants.ALLOWED_TECHLEVEL));
-        boolean allowNukes = client.getGame().getOptions().booleanOption(OptionsConstants.ADVAERORULES_AT2_NUKES);
+              client.getGame().getOptions().stringOption(OptionsConstants.ALLOWED_TECH_LEVEL));
+        boolean allowNukes = client.getGame()
+              .getOptions()
+              .booleanOption(OptionsConstants.ADVANCED_AERO_RULES_AT2_NUKES);
         m_bombs = new BombChoicePanel((IBomber) entity, allowNukes, techLevel >= TechConstants.T_SIMPLE_ADVANCED);
         panBombs.add(m_bombs, GBC.std());
     }
@@ -714,6 +823,18 @@ public class EquipChoicePanel extends JPanel {
         }
     }
 
+    /**
+     * Sets up the Variable Range Targeting mode selection panel. Only called if entity has the VRT quirk.
+     */
+    private void setupVRT() {
+        panVRT = new VRTChoicePanel(entity);
+        panVRTContainer.setBorder(BorderFactory.createTitledBorder(BorderFactory.createEmptyBorder(),
+              Messages.getString("CustomMekDialog.VRTPanelTitle"),
+              TitledBorder.TOP,
+              TitledBorder.DEFAULT_POSITION));
+        panVRTContainer.add(panVRT);
+    }
+
     private void setupMines() {
         GridBagLayout gbl = new GridBagLayout();
         panMines.setLayout(gbl);
@@ -722,7 +843,7 @@ public class EquipChoicePanel extends JPanel {
         int row = 0;
         for (MiscMounted miscMounted : entity.getMisc()) {
             if (!miscMounted.getType().hasFlag((MiscType.F_MINE)) &&
-                      !miscMounted.getType().hasFlag((MiscType.F_VEHICLE_MINE_DISPENSER))) {
+                  !miscMounted.getType().hasFlag((MiscType.F_VEHICLE_MINE_DISPENSER))) {
                 continue;
             }
 
@@ -752,6 +873,7 @@ public class EquipChoicePanel extends JPanel {
         choC3.setEnabled(false);
         chAutoEject.setEnabled(false);
         chSearchlight.setEnabled(false);
+        chDamageInterruptCircuit.setEnabled(false);
         if (m_bombs != null) {
             m_bombs.setEnabled(false);
         }
@@ -759,6 +881,7 @@ public class EquipChoicePanel extends JPanel {
         disableAPMEditing();
         disableMEAEditing();
         disableMGSetting();
+        disableVRTSetting();
         disableMineSetting();
         panInfArmor.setEnabled(false);
     }
@@ -784,6 +907,12 @@ public class EquipChoicePanel extends JPanel {
     private void disableMGSetting() {
         for (RapidFireMGPanel mVMG : m_vMGs) {
             mVMG.setEnabled(false);
+        }
+    }
+
+    private void disableVRTSetting() {
+        if (panVRT != null) {
+            panVRT.setEnabled(false);
         }
     }
 
@@ -849,6 +978,10 @@ public class EquipChoicePanel extends JPanel {
         for (final RapidFireMGPanel rapidfireMGPanel : m_vMGs) {
             rapidfireMGPanel.applyChoice();
         }
+        // update Variable Range Targeting mode
+        if (panVRT != null) {
+            panVRT.applyChoice();
+        }
         // update mines setting
         for (final MineChoicePanel mineChoicePanel : m_vMines) {
             mineChoicePanel.applyChoice();
@@ -867,13 +1000,91 @@ public class EquipChoicePanel extends JPanel {
             entity.setSearchlightState(chSearchlight.isSelected());
         }
 
+        // update DNI Cockpit Modification setting (IO p.83)
+        Game game = (clientgui == null) ? client.getGame() : clientgui.getClient().getGame();
+        if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_TRACK_NEURAL_INTERFACE_HARDWARE)) {
+            boolean wantsDNI = chDNICockpitMod.isSelected();
+            boolean hasDNI = entity.hasDNICockpitMod();
+            if (wantsDNI && !hasDNI) {
+                // Add DNI Cockpit Mod
+                MiscType dniMod = (MiscType) EquipmentType.get("DNICockpitModification");
+                if (dniMod != null) {
+                    try {
+                        entity.addEquipment(dniMod, Entity.LOC_NONE);
+                    } catch (Exception e) {
+                        LOGGER.debug("Failed to add DNI cockpit modification to {}: {}",
+                              entity.getDisplayName(), e.getMessage());
+                    }
+                }
+            } else if (!wantsDNI && hasDNI) {
+                // Remove DNI Cockpit Mod
+                for (MiscMounted mounted : entity.getMisc()) {
+                    if (mounted.getType().hasFlag(MiscType.F_DNI_COCKPIT_MOD)) {
+                        entity.removeMisc(mounted.getName());
+                        break;
+                    }
+                }
+            }
+        }
+
+        // update EI Interface setting (IO p.69)
+        if (game.getOptions().booleanOption(OptionsConstants.ADVANCED_TRACK_NEURAL_INTERFACE_HARDWARE)) {
+            boolean wantsEI = chEICockpit.isSelected();
+            boolean hasEI = entity.hasEiCockpit();
+            if (wantsEI && !hasEI) {
+                // Add EI Interface
+                MiscType eiInterface = (MiscType) EquipmentType.get("EIInterface");
+                if (eiInterface != null) {
+                    try {
+                        entity.addEquipment(eiInterface, Entity.LOC_NONE);
+                    } catch (Exception e) {
+                        LOGGER.debug("Failed to add EI Interface to {}: {}",
+                              entity.getDisplayName(), e.getMessage());
+                    }
+                }
+            } else if (!wantsEI && hasEI) {
+                // Remove EI Interface
+                for (MiscMounted mounted : entity.getMisc()) {
+                    if (mounted.getType().hasFlag(MiscType.F_EI_INTERFACE)) {
+                        entity.removeMisc(mounted.getName());
+                        break;
+                    }
+                }
+            }
+        }
+
+        // update Damage Interrupt Circuit setting (IO p.39)
+        if ((entity instanceof Mek mek) && ((!entity.isClan()) || (entity.isMixedTech()))) {
+            boolean hasDamageInterruptCircuit = mek.hasDamageInterruptCircuit();
+            boolean wantsDamageInterruptCircuit = chDamageInterruptCircuit.isSelected();
+            if ((wantsDamageInterruptCircuit) && (!hasDamageInterruptCircuit)) {
+                // Add Damage Interrupt Circuit equipment
+                try {
+                    EquipmentType damageInterruptCircuitType = EquipmentType.get("DamageInterruptCircuit");
+                    if (damageInterruptCircuitType != null) {
+                        entity.addEquipment(damageInterruptCircuitType, Entity.LOC_NONE);
+                    }
+                } catch (Exception e) {
+                    // 0-crit equipment shouldn't fail to add
+                }
+            } else if ((!wantsDamageInterruptCircuit) && (hasDamageInterruptCircuit)) {
+                // Remove Damage Interrupt Circuit equipment
+                for (MiscMounted mounted : entity.getMisc()) {
+                    if (mounted.getType().hasFlag(MiscType.F_DAMAGE_INTERRUPT_CIRCUIT)) {
+                        entity.removeMisc(mounted.getType().getInternalName());
+                        break;
+                    }
+                }
+            }
+        }
+
         if (entity.hasC3() && (choC3.getSelectedIndex() > -1)) {
             Entity chosen = client.getEntity(entityCorrespondence[choC3.getSelectedIndex()]);
             int entC3nodeCount = client.getGame().getC3SubNetworkMembers(entity).size();
             int choC3nodeCount = client.getGame().getC3NetworkMembers(chosen).size();
 
             if ((entC3nodeCount + choC3nodeCount) <= Entity.MAX_C3_NODES &&
-                      ((chosen == null) || entity.getC3MasterId() != chosen.getId())) {
+                  ((chosen == null) || entity.getC3MasterId() != chosen.getId())) {
                 entity.setC3Master(chosen, true);
             } else if ((chosen != null) && entity.getC3MasterId() != chosen.getId()) {
                 String message = Messages.getString("CustomMekDialog.NetworkTooBig.message",
@@ -883,7 +1094,10 @@ public class EquipChoicePanel extends JPanel {
                       choC3nodeCount,
                       Entity.MAX_C3_NODES);
                 if (clientgui == null) {
-                    JOptionPane.showMessageDialog(this, Messages.getString("CustomMekDialog.NetworkTooBig.title"), message, JOptionPane.WARNING_MESSAGE);
+                    JOptionPane.showMessageDialog(this,
+                          Messages.getString("CustomMekDialog.NetworkTooBig.title"),
+                          message,
+                          JOptionPane.WARNING_MESSAGE);
                 } else {
                     clientgui.doAlertDialog(Messages.getString("CustomMekDialog.NetworkTooBig.title"), message);
                 }
@@ -894,5 +1108,52 @@ public class EquipChoicePanel extends JPanel {
         } else if (entity.hasNavalC3() && (choC3.getSelectedIndex() > -1)) {
             entity.setC3NetId(client.getEntity(entityCorrespondence[choC3.getSelectedIndex()]));
         }
+    }
+
+    /**
+     * Refreshes the neural interface checkboxes based on current pilot implant status. Called when switching to the
+     * Equipment tab to pick up changes made in the Pilot tab.
+     *
+     * <p>This method only auto-CHECKS the checkbox when an implant is detected but hardware is missing.
+     * It respects manual unchecking - if the user has unchecked the box (hardware not present and box unchecked),
+     * it won't force it back to checked. This allows testing scenarios where pilot has implant but unit lacks hardware.</p>
+     */
+    public void refreshNeuralInterfaceCheckboxes() {
+        Game game = (clientgui == null) ? client.getGame() : clientgui.getClient().getGame();
+        if (!game.getOptions().booleanOption(OptionsConstants.ADVANCED_TRACK_NEURAL_INTERFACE_HARDWARE)) {
+            return;
+        }
+
+        // Refresh DNI checkbox - only force checked when hardware is present
+        // Respects manual unchecking when pilot has implant but user wants to test without hardware
+        if (entity.hasDNICockpitMod()) {
+            chDNICockpitMod.setSelected(true);
+        }
+
+        // Refresh EI checkbox - only force checked when hardware is present
+        // Respects manual unchecking when pilot has implant but user wants to test without hardware
+        if (entity.hasEiCockpit()) {
+            chEICockpit.setSelected(true);
+        }
+    }
+
+    /**
+     * Sets the DNI Cockpit Modification checkbox state directly. Called from CustomMekDialog when a DNI implant option
+     * is toggled.
+     *
+     * @param selected true to check the checkbox, false to uncheck
+     */
+    public void setDNICockpitModSelected(boolean selected) {
+        chDNICockpitMod.setSelected(selected);
+    }
+
+    /**
+     * Sets the EI Interface checkbox state directly. Called from CustomMekDialog when the EI implant option is
+     * toggled.
+     *
+     * @param selected true to check the checkbox, false to uncheck
+     */
+    public void setEICockpitSelected(boolean selected) {
+        chEICockpit.setSelected(selected);
     }
 }

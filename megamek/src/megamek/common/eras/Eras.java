@@ -25,14 +25,12 @@
  * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
  * InMediaRes Productions, LLC.
  *
- * MechWarrior Copyright Microsoft Corporation. <Package Name> was created under
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
  * Microsoft's "Game Content Usage Rules"
  * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
  * affiliated with Microsoft.
  */
 package megamek.common.eras;
-
-import static java.util.stream.Collectors.toList;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -48,8 +46,8 @@ import java.util.Set;
 import java.util.TreeMap;
 
 import megamek.MMConstants;
-import megamek.common.ITechnology;
 import megamek.common.annotations.Nullable;
+import megamek.common.interfaces.ITechnology;
 import megamek.common.util.fileUtils.MegaMekFile;
 import megamek.logging.MMLogger;
 import megamek.utilities.xml.MMXMLUtility;
@@ -214,7 +212,7 @@ public final class Eras {
     private final TreeMap<LocalDate, Era> eras = new TreeMap<>();
 
     /**
-     * This list contains all eras, even if they're malformed and is used for trouble-shooting.
+     * This list contains all eras, even if they're malformed and is used for troubleshooting.
      */
     private final List<Era> eraList = new ArrayList<>();
 
@@ -250,14 +248,14 @@ public final class Eras {
         for (int x = 0; x < nl.getLength(); x++) {
             final Node wn = nl.item(x);
             if (wn.getParentNode().equals(element) && (wn.getNodeType() == Node.ELEMENT_NODE)
-                      && wn.getNodeName().equalsIgnoreCase("era") && wn.hasChildNodes()) {
+                  && wn.getNodeName().equalsIgnoreCase("era") && wn.hasChildNodes()) {
                 addEra(generateInstanceFromXML(wn.getChildNodes()));
             }
         }
         eraList.sort(Comparator.comparing(Era::end));
         if (!areAllValid(null)) {
             logger
-                  .error("The eras definition file " + MMConstants.ERAS_FILE_PATH + "contains malformed eras!");
+                  .error("The eras definition file {}contains malformed eras!", MMConstants.ERAS_FILE_PATH);
         }
     }
 
@@ -303,7 +301,7 @@ public final class Eras {
      */
     private boolean isValid(Era era) {
         return !era.code().isBlank() && !era.name().isBlank()
-                     && ((era.mulId() == -1) || (era.mulId() > 0));
+              && ((era.mulId() == -1) || (era.mulId() > 0));
     }
 
     /**
@@ -331,7 +329,7 @@ public final class Eras {
 
         // Exactly one era must be the last era
         if (eraList.stream().filter(Era::isLastEra).count() != 1) {
-            invalidErasReturn.addAll(eraList.stream().filter(Era::isLastEra).collect(toList()));
+            invalidErasReturn.addAll(eraList.stream().filter(Era::isLastEra).toList());
         }
 
         return invalidErasReturn.isEmpty();

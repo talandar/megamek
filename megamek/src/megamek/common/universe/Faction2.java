@@ -35,15 +35,7 @@ package megamek.common.universe;
 import java.awt.Color;
 import java.io.File;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.NavigableMap;
-import java.util.Optional;
-import java.util.Set;
-import java.util.TreeMap;
+import java.util.*;
 
 import com.fasterxml.jackson.annotation.JsonGetter;
 import com.fasterxml.jackson.annotation.JsonIgnore;
@@ -56,6 +48,7 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
 import megamek.MMConstants;
 import megamek.client.ratgenerator.FactionRecord;
+import megamek.common.annotations.Nullable;
 
 /**
  * This is a Faction class that unifies MHQ's Faction and the RATGenerator's FactionRecord and makes it available to all
@@ -77,12 +70,14 @@ import megamek.client.ratgenerator.FactionRecord;
  * avoid repetition.
  */
 @SuppressWarnings("unused") // Class fields are assigned when factions are loaded from YAML files
-@JsonPropertyOrder({"key", "name", "nameChanges", "capital", "capitalChanges", "yearsActive", "successor",
-      "tags", "color", "logo", "background", "camos", "camosChanges", "nameGenerator", "eraMods", "ratingLevels",
-      "fallBackFactions", "preInvasionHonorRating", "postInvasionHonorRating", "formationBaseSize", "formationGrouping"})
+@JsonPropertyOrder({ "key", "name", "nameChanges", "capital", "capitalChanges", "yearsActive", "successor", "tags",
+                     "color", "logo", "background", "camos", "camosChanges", "nameGenerator", "eraMods", "ratingLevels",
+                     "fallBackFactions", "preInvasionHonorRating", "postInvasionHonorRating", "formationBaseSize",
+                     "formationGrouping", "rankSystem", "factionLeaders" })
 public class Faction2 {
-
     private static final int UNKNOWN = -1;
+    private static final String DEFAULT_RANK_SYSTEM_INNER_SPHERE = "SLDF";
+    private static final String DEFAULT_RANK_SYSTEM_CLAN = "CLAN";
 
     private String key;
     private String name;
@@ -91,8 +86,8 @@ public class Faction2 {
     private final NavigableMap<Integer, String> capitalChanges = new TreeMap<>();
     private final ArrayList<FactionRecord.DateRange> yearsActive = new ArrayList<>();
     private String successor;
-    private Set<FactionTag> tags = new HashSet<>();
-    private Color color = Color.LIGHT_GRAY;
+    private final Set<FactionTag> tags = new HashSet<>();
+    private final Color color = Color.LIGHT_GRAY;
     private String logo;
     private String background;
 
@@ -106,8 +101,11 @@ public class Faction2 {
     private final Set<String> fallBackFactions = new HashSet<>();
     private final HonorRating preInvasionHonorRating = HonorRating.NONE;
     private final HonorRating postInvasionHonorRating = HonorRating.NONE;
+    // Do not final the variables
     private int formationBaseSize = UNKNOWN;
     private int formationGrouping = UNKNOWN;
+    private String rankSystem = null;
+    private List<FactionLeaderData> factionLeaders = new ArrayList<>();
 
     public List<String> getRatingLevels() {
         return ratingLevels;
@@ -162,12 +160,78 @@ public class Faction2 {
         return nameGenerator;
     }
 
-    public HonorRating getPreInvasionHonorRating() {
+    /**
+     * Returns the pre-invasion honor rating assigned to this faction, if any.
+     *
+     * <p>This method provides direct access to the stored {@link HonorRating} value representing the faction's honor
+     * rating before the invasion period. No default or fallback value is applied.</p>
+     *
+     * <p><b>Usage:</b> this method is for directly retrieving the value stored in {@code preInvasionHonorRating},
+     * generally you'll want to use {@link #getPreInvasionHonorRating()} instead, as that includes essential fallback
+     * values.</p>
+     *
+     * @return the pre-invasion {@link HonorRating}, or {@code null} if not set
+     */
+    public HonorRating getPreInvasionHonorRatingDirect() {
         return preInvasionHonorRating;
     }
 
-    public HonorRating getPostInvasionHonorRating() {
+    /**
+     * Calculates and returns the effective pre-invasion honor rating for this faction.
+     *
+     * <p>For Clan factions, returns the stored honor rating if it is set and not {@link HonorRating#NONE};
+     * otherwise, returns {@link HonorRating#STRICT} as the default. For non-Clan factions, this simply returns the
+     * stored honor rating, which will likely be {@link HonorRating#NONE}.</p>
+     *
+     * <p><b>Usage:</b> this method is the primary way to retrieve a faction's pre-invasion honor rating. However,
+     * as it includes fallback values, if you want to directly access the value stored in {@code preInvasionHonorRating}
+     * you will want to call {@link #getPreInvasionHonorRatingDirect()}, instead.</p>
+     *
+     * @return the effective pre-invasion {@link HonorRating} for the faction
+     */
+    public HonorRating getPreInvasionHonorRating() {
+        if (isClan()) {
+            return (preInvasionHonorRating != HonorRating.NONE) ? preInvasionHonorRating : HonorRating.STRICT;
+        } else {
+            return preInvasionHonorRating;
+        }
+    }
+
+    /**
+     * Returns the post-invasion honor rating assigned to this faction, if any.
+     *
+     * <p>This method provides direct access to the stored {@link HonorRating} value representing the faction's honor
+     * rating after the invasion period. No default or fallback value is applied.</p>
+     *
+     * <p><b>Usage:</b> this method is for directly retrieving the value stored in {@code postInvasionHonorRating},
+     * generally you'll want to use {@link #getPostInvasionHonorRating()} instead, as that includes essential fallback
+     * values.</p>
+     *
+     * @return the pre-invasion {@link HonorRating}, or {@code null} if not set
+     */
+    public HonorRating getPostInvasionHonorRatingDirect() {
         return postInvasionHonorRating;
+    }
+
+    /**
+     * Calculates and returns the effective post-invasion honor rating for this faction.
+     *
+     * <p>For Clan factions, returns the stored honor rating if it is set and not {@link HonorRating#NONE};
+     * otherwise, returns {@link HonorRating#OPPORTUNISTIC} as the default. For non-Clan factions, this simply returns
+     * the stored honor rating, which will likely be {@link HonorRating#NONE}.</p>
+     *
+     * <p><b>Usage:</b> this method is the primary way to retrieve a faction's post-invasion honor rating. However,
+     * as it includes fallback values, if you want to directly access the value stored in
+     * {@code postInvasionHonorRating} you will want to call {@link #getPostInvasionHonorRatingDirect()}, instead.</p>
+     *
+     * @return the effective post-invasion {@link HonorRating} for the faction
+     */
+    public HonorRating getPostInvasionHonorRating() {
+        if (isClan()) {
+            return (postInvasionHonorRating != HonorRating.NONE) ? postInvasionHonorRating : HonorRating.OPPORTUNISTIC;
+        } else {
+            return postInvasionHonorRating;
+        }
     }
 
     public String getCamosFolder(int year) {
@@ -193,7 +257,7 @@ public class Faction2 {
 
     /**
      * Returns the size of the lowest formation type (lance). If this faction gives the size directly
-     * (formationBaseSize:) this value is returned. Otherwise the fallback Factions are called recursively. When there
+     * (formationBaseSize) this value is returned. Otherwise, the fallback Factions are called recursively. When there
      * is no callback Faction, 5 is returned for a clan faction and 4 otherwise.
      * <p>
      * This means that the Word of Blake Faction will give a value of 6 and WoB subcommands do not have to give any
@@ -217,9 +281,9 @@ public class Faction2 {
 
     /**
      * Returns the grouping multiplier for accumulated formations such as company, galaxy or level 3. If this faction
-     * gives the value directly (formationGrouping:) this value is returned. Otherwise the fallback Factions are called
+     * gives the value directly (formationGrouping) this value is returned. Otherwise, the fallback Factions are called
      * recursively. When there is no callback Faction, 5 is returned for a clan faction and 3 otherwise (3 lances form a
-     * company, 3 companies form a battalion etc)
+     * company, 3 companies form a battalion etc.)
      * <p>
      * This means that the Word of Blake Faction will give a value of 6 and WoB subcommands do not have to give any
      * value as long as their fallback Faction is WoB.
@@ -238,6 +302,81 @@ public class Faction2 {
             }
         }
         return isClan() ? 5 : 3;
+    }
+
+    /**
+     * Retrieves the rank system identifier for this faction.
+     *
+     * <p>The method checks the `rankSystem` field; if it is set and not {@code null}, its value is returned
+     * directly.</p>
+     *
+     * <p>If the rank system is unspecified but there are fallback factions, the method iterates through each
+     * fallback faction, returning the first available rank system found among them.</p>
+     *
+     * <p>If no fallback faction provides a rank system, the method returns a default value based on whether the
+     * faction is a clan or not.</p>
+     *
+     * @return the rank system identifier for this faction, or a default value ({@link #DEFAULT_RANK_SYSTEM_CLAN} for
+     *       Clan factions, {@link #DEFAULT_RANK_SYSTEM_INNER_SPHERE} for non-Clan factions) if not specified.
+     *
+     * @author Illiani
+     * @since 0.50.07
+     */
+    public String getRankSystem() {
+        if (rankSystem != null) {
+            return rankSystem;
+        } else if (!fallBackFactions.isEmpty()) {
+            for (String factionCode : fallBackFactions) {
+                Optional<Faction2> fallBackFaction = Factions2.getInstance().getFaction(factionCode);
+                if (fallBackFaction.isPresent()) {
+                    return fallBackFaction.get().getRankSystem();
+                }
+            }
+        }
+        return isClan() ? DEFAULT_RANK_SYSTEM_CLAN : DEFAULT_RANK_SYSTEM_INNER_SPHERE;
+    }
+
+    /**
+     * Returns the list of leaders for this faction.
+     *
+     * @return a list containing all {@link FactionLeaderData} objects associated with this faction
+     *
+     * @author Illiani
+     * @since 0.50.07
+     */
+    public List<FactionLeaderData> getFactionLeaders() {
+        return factionLeaders;
+    }
+
+    /**
+     * Sets the list of leaders for this faction.
+     *
+     * @param factionLeaders the list of {@link FactionLeaderData} to associate with this faction
+     *
+     * @author Illiani
+     * @since 0.50.07
+     */
+    public void setFactionLeaders(List<FactionLeaderData> factionLeaders) {
+        this.factionLeaders = factionLeaders;
+    }
+
+    /**
+     * Retrieves the faction leader in power during the specified year.
+     *
+     * @param year the year to check for a valid leader
+     *
+     * @return the {@link FactionLeaderData} for the leader valid in the given year, or {@code null} if none found
+     *
+     * @author Illiani
+     * @since 0.50.07
+     */
+    public @Nullable FactionLeaderData getFactionLeaderForYear(final int year) {
+        for (FactionLeaderData leader : factionLeaders) {
+            if (leader.isValidInYear(year)) {
+                return leader;
+            }
+        }
+        return null;
     }
 
     @JsonIgnore
@@ -270,6 +409,7 @@ public class Faction2 {
      * Writes this faction as YAML to the given file.
      *
      * @param file The file to write to.
+     *
      * @throws IOException When an error occurs
      */
     public void saveToFile(File file) throws IOException {
@@ -287,7 +427,7 @@ public class Faction2 {
 
     /**
      * Writes this faction as YAML to the standard directories in data/universe/factions or data/universe/commands with
-     * the standard name (key).yml, depending on whether the key contains a ".".
+     * the standard name (key).yml, depending on whether the key contains a "."
      *
      * @throws IOException When an error occurs
      */
@@ -297,11 +437,12 @@ public class Faction2 {
     }
 
     /**
-     * Writes this faction with updates from a changed FactionRecord as YAML to the given file. This method is
-     * hopefully temporary; it is used for RatGeneratorEditor changes while FactionRecord stays a separate class.
-     * Note that this method applies the changes to the "real" faction and keeps the change for the present runtime.
+     * Writes this faction with updates from a changed FactionRecord as YAML to the given file. This method is hopefully
+     * temporary; it is used for RatGeneratorEditor changes while FactionRecord stays a separate class. Note that this
+     * method applies the changes to the "real" faction and keeps the change for the present runtime.
      *
      * @param updatedRecord A FactionRecord with changes to apply to the present faction and save to file
+     *
      * @throws IOException When an error occurs
      */
     public void saveToFile(FactionRecord updatedRecord) throws IOException {
@@ -339,12 +480,12 @@ public class Faction2 {
 
     @JsonGetter("preInvasionHonorRating")
     private HonorRating preInvasionHonorRatingSerializer() {
-        return preInvasionHonorRating != HonorRating.NONE ? preInvasionHonorRating : null;
+        return preInvasionHonorRating;
     }
 
     @JsonGetter("postInvasionHonorRating")
     private HonorRating getPostInvasionHonorRatingSerializer() {
-        return postInvasionHonorRating != HonorRating.NONE ? postInvasionHonorRating : null;
+        return postInvasionHonorRating;
     }
 
     @JsonGetter("formationGrouping")
@@ -353,8 +494,18 @@ public class Faction2 {
     }
 
     @JsonGetter("formationBaseSize")
-    private Integer originalformationBaseSize() {
+    private Integer originalFormationBaseSize() {
         return formationBaseSize != UNKNOWN ? formationBaseSize : null;
+    }
+
+    @JsonGetter("rankSystem")
+    private String originalRankSystem() {
+        return !Objects.equals(rankSystem, UNKNOWN + "") ? rankSystem : null;
+    }
+
+    @JsonGetter("factionLeaders")
+    private List<FactionLeaderData> originalFactionLeaders() {
+        return !Objects.equals(factionLeaders, new ArrayList<>()) ? factionLeaders : null;
     }
 
     @JsonGetter("tags") // sorts tags alphabetically (would be random otherwise)
@@ -363,7 +514,7 @@ public class Faction2 {
     }
 
     /**
-     * @return True if this faction performs Batchalls.
+     * @return True if this faction performs BatchAlls.
      */
     public boolean performsBatchalls() {
         return tags.contains(FactionTag.BATCHALL);

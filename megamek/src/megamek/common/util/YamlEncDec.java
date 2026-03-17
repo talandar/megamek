@@ -35,36 +35,33 @@ package megamek.common.util;
 import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
+import java.math.BigDecimal;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Map;
 
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
-
-import megamek.common.AmmoType;
-import megamek.common.EquipmentType;
-import megamek.common.MiscType;
-import megamek.common.WeaponType;
+import megamek.common.equipment.AmmoType;
+import megamek.common.equipment.EquipmentType;
+import megamek.common.equipment.MiscType;
+import megamek.common.equipment.WeaponType;
 import megamek.logging.MMLogger;
 
 public class YamlEncDec {
     private static final MMLogger logger = MMLogger.create(YamlEncDec.class);
 
     /**
-     * Serializes an EquipmentType using the ideal serializer.
+     * Serializes an EquipmentType to a YAML-compatible map.
+     * The equipment type's getYamlData() method handles all serialization,
+     * including type-specific data, flags, and version information.
      *
      * @param equipmentType The EquipmentType to serialize.
+     *
      * @return A Map containing the serialized data.
      */
     public static Map<String, Object> serialize(EquipmentType equipmentType) {
-        YamlSerializerEquipmentType serializer;
-        if (equipmentType instanceof AmmoType) {
-            serializer = new YamlSerializerAmmoType();
-        } else {
-            serializer = new YamlSerializerEquipmentType();
-        }
-        return serializer.serialize(equipmentType);
+        return equipmentType.getYamlData();
     }
 
     private static String sanitizeFileName(String name) {
@@ -86,22 +83,38 @@ public class YamlEncDec {
             data.put(key, value);
         }
     }
-    
+
+    /**
+     * Formats a double value to avoid scientific notation in YAML output.
+     * Returns the appropriate Number type for clean serialization.
+     *
+     * @param value The double value to format
+     * @return Long for whole numbers, BigDecimal for decimals
+     */
+    public static Number formatDouble(double value) {
+        if (value == Math.floor(value) && !Double.isInfinite(value)) {
+            // Whole number - return as long (serializes as plain integer)
+            return (long) value;
+        }
+        // Has decimal places - BigDecimal handles small decimals correctly
+        return BigDecimal.valueOf(value);
+    }
+
     public static void addPropIfNotDefault(Map<String, Object> data, String key, Object value, Object defaultValue) {
         if (data == null || key == null || key.trim().isEmpty()) {
             return;
         }
-        
+
         // Handle null cases
         if (value == null && defaultValue == null) {
             return; // Both null, don't add
         }
-        
+
         if (value == null || defaultValue == null) {
             data.put(key, value); // One is null, add the value
             return;
         }
-        
+
         // For numeric types, handle floating point precision
         if (value instanceof Number && defaultValue instanceof Number) {
             if (isFloatingPoint(value) || isFloatingPoint(defaultValue)) {
@@ -114,7 +127,7 @@ public class YamlEncDec {
             }
             return;
         }
-        
+
         // Default comparison using equals()
         if (!value.equals(defaultValue)) {
             data.put(key, value);
@@ -124,17 +137,18 @@ public class YamlEncDec {
     private static boolean isFloatingPoint(Object value) {
         return value instanceof Double || value instanceof Float;
     }
-    
+
     public static void writeEquipmentDatabase(String targetFolder) {
         try {
-            logger.info("Exporting YAML files to " + targetFolder);
-            HashMap <String, Boolean> seen = new HashMap<>();
-            
+            logger.info("Exporting YAML files to {}", targetFolder);
+            HashMap<String, Boolean> seen = new HashMap<>();
+
             YAMLMapper mapper = new YAMLMapper();
             mapper.enable(SerializationFeature.INDENT_OUTPUT);
 
             // Write everything except ammo types that come from mutations
-            for (Enumeration<EquipmentType> equipmentTypes = EquipmentType.getAllTypes(); equipmentTypes.hasMoreElements(); ) {
+            for (Enumeration<EquipmentType> equipmentTypes = EquipmentType.getAllTypes();
+                  equipmentTypes.hasMoreElements(); ) {
                 EquipmentType equipmentType = equipmentTypes.nextElement();
                 if (equipmentType instanceof AmmoType ammo) {
                     if (ammo.getBaseAmmo() != null) {
@@ -144,7 +158,8 @@ public class YamlEncDec {
                 writeEquipmentYamlEntry(equipmentType, targetFolder, mapper, seen);
             }
             // Now write the ammo types that comes from mutations
-            for (Enumeration<EquipmentType> equipmentTypes = EquipmentType.getAllTypes(); equipmentTypes.hasMoreElements(); ) {
+            for (Enumeration<EquipmentType> equipmentTypes = EquipmentType.getAllTypes();
+                  equipmentTypes.hasMoreElements(); ) {
                 EquipmentType equipmentType = equipmentTypes.nextElement();
                 if (equipmentType instanceof AmmoType ammo) {
                     if (ammo.getBaseAmmo() == null) {
@@ -156,14 +171,13 @@ public class YamlEncDec {
                 writeEquipmentYamlEntry(equipmentType, targetFolder, mapper, seen);
             }
         } catch (Exception e) {
-            System.out.println("Error writing YAML database: " + e.getMessage());
-            e.printStackTrace();
-            logger.error("", e);
+            logger.error(e, "Error writing YAML database: {}", e.getMessage());
         }
     }
 
-    private static void writeEquipmentYamlEntry(EquipmentType equipmentType, String targetFolder, YAMLMapper yamlMapper, HashMap <String, Boolean> seen)
-            throws Exception {
+    private static void writeEquipmentYamlEntry(EquipmentType equipmentType, String targetFolder, YAMLMapper yamlMapper,
+          HashMap<String, Boolean> seen)
+          throws Exception {
         String typeFolder;
         String seenKey = null;
         if (equipmentType instanceof AmmoType) {
@@ -175,7 +189,7 @@ public class YamlEncDec {
         } else {
             throw new Exception("Failed YAML export for unknown equipment type: " + equipmentType.getName());
         }
-        
+
         File parentDir = new File(targetFolder + File.separator + typeFolder);
         if (!parentDir.exists()) {
             if (!parentDir.mkdirs()) {
@@ -185,7 +199,7 @@ public class YamlEncDec {
         String fileName = null;
         Map<String, Object> content = null;
         boolean appendMode = false;
-        System.out.println("- "+equipmentType.getName());
+        System.out.println("- " + equipmentType.getName());
         if (equipmentType instanceof AmmoType ammo) {
             if (ammo.getBaseAmmo() != null) {
                 fileName = ammo.getBaseAmmo().getShortName();
@@ -193,29 +207,30 @@ public class YamlEncDec {
                 fileName = ammo.getShortName();
             }
             content = ammo.getYamlData();
-        } else
-        if (equipmentType instanceof WeaponType weapon) {
-            fileName =  weapon.getShortName();
+        } else if (equipmentType instanceof WeaponType weapon) {
+            fileName = weapon.getShortName();
             content = weapon.getYamlData();
-        } else 
-        if (equipmentType instanceof MiscType misc) {
-            fileName =  misc.getShortName();
+        } else if (equipmentType instanceof MiscType misc) {
+            fileName = misc.getShortName();
             content = misc.getYamlData();
         }
         //TODO: BombType, SmallWeaponAmmoType, ArmorType
         fileName = sanitizeFileName(fileName);
         if (fileName == null) {
-            throw new Exception("Filename could not be determined for equipment type: " + equipmentType.getName() + ". Skipping YAML export for this item.");
+            throw new Exception("Filename could not be determined for equipment type: "
+                  + equipmentType.getName()
+                  + ". Skipping YAML export for this item.");
         }
         if (content == null) {
             throw new Exception("Content for YAML export is null for: " + fileName + ". Skipping.");
         }
-        seenKey = typeFolder+"_"+fileName;
+        seenKey = typeFolder + "_" + fileName;
         if (equipmentType instanceof AmmoType ammo) {
             if (ammo.getBaseAmmo() != null) {
                 if (!seen.containsKey(seenKey)) {
-                    throw new Exception("Not found seen key "+seenKey+ " for ammo mutation "+ammo.getName());
-                };
+                    throw new Exception("Not found seen key " + seenKey + " for ammo mutation " + ammo.getName());
+                }
+
             }
         }
         final String fullPath = parentDir.getAbsolutePath() + File.separator + fileName + ".yaml";

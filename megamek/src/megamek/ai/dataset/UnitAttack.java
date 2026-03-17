@@ -34,17 +34,18 @@ package megamek.ai.dataset;
 
 import static org.apache.commons.lang3.ObjectUtils.firstNonNull;
 
-import megamek.common.Entity;
-import megamek.common.Game;
-import megamek.common.INarcPod;
-import megamek.common.UnitRole;
 import megamek.common.actions.AbstractAttackAction;
 import megamek.common.actions.ArtilleryAttackAction;
 import megamek.common.actions.WeaponAttackAction;
 import megamek.common.enums.AimingMode;
+import megamek.common.equipment.INarcPod;
+import megamek.common.game.Game;
+import megamek.common.units.Entity;
+import megamek.common.units.UnitRole;
 
 /**
  * Flexible container for unit attack data using a map-based approach with enum keys.
+ *
  * @author Luana Coppio
  */
 public class UnitAttack extends EntityDataMap<UnitAttack.Field> {
@@ -78,7 +79,7 @@ public class UnitAttack extends EntityDataMap<UnitAttack.Field> {
         GTA,
         TO_HIT,
         TURNS_TO_HIT,
-        SPOTTER_ID;
+        SPOTTER_ID
     }
 
     /**
@@ -90,8 +91,10 @@ public class UnitAttack extends EntityDataMap<UnitAttack.Field> {
 
     /**
      * Creates a UnitAttackMap from an AbstractAttackAction.
+     *
      * @param attackAction The attack action to extract data from
-     * @param game The game reference
+     * @param game         The game reference
+     *
      * @return A populated UnitAttackMap
      */
     public static UnitAttack fromAttackAction(AbstractAttackAction attackAction, Game game) {
@@ -101,7 +104,8 @@ public class UnitAttack extends EntityDataMap<UnitAttack.Field> {
         map.put(Field.ROUND, game.getCurrentRound());
 
         // Attacker information
-        Entity attacker = attackAction.getEntity(game);
+        Entity weaponEntity = attackAction.getEntity(game);
+        Entity attacker = weaponEntity.getAttackingEntity();
         if (attacker != null) {
             map.put(Field.ENTITY_ID, attacker.getId())
                   .put(Field.PLAYER_ID, attacker.getOwnerId())
