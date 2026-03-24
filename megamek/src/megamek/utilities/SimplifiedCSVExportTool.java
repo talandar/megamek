@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -37,7 +38,13 @@ import megamek.codeUtilities.StringUtility;
 import megamek.common.*;
 import megamek.common.annotations.Nullable;
 import megamek.common.equipment.ArmorType;
+import megamek.common.equipment.EquipmentType;
+import megamek.common.loaders.MekFileParser;
+import megamek.common.loaders.MekSummary;
+import megamek.common.loaders.MekSummaryCache;
 import megamek.common.templates.TROView;
+import megamek.common.units.Entity;
+import megamek.common.units.Infantry;
 import megamek.logging.MMLogger;
 
 /**
@@ -67,8 +74,8 @@ public final class SimplifiedCSVExportTool {
     private static final String NOT_APPLICABLE = "Not Applicable";
 
     private static final List<String> HEADERS = List.of("Chassis", "Model", "MUL ID", "Combined", "Clan",
-            "Weight", "Intro Date", "Unit Type", "BV", "Rules", "Equipment", "Armor", "Structure", "Movement", "Heat " +
-                                                                                                                     "Sunk");
+            "Weight", "Intro Date", "Unit Type", "BV", "Rules", "Equipment", "Armor", "Structure", "Movement",
+            "Heat Sunk", "Clan Chassis Name", "Is Omnimech");
 
     public static void main(String... args) {
         if (args.length > 0) {
@@ -78,6 +85,12 @@ public final class SimplifiedCSVExportTool {
         try (PrintWriter pw = new PrintWriter(FILE_NAME);
                 BufferedWriter bw = new BufferedWriter(pw)) {
             MekSummaryCache cache = MekSummaryCache.getInstance(true);
+            while(!cache.isInitialized()){
+                try{
+                    Thread.sleep(1000);
+                    System.out.println("waiting for cache init");
+                }catch(InterruptedException e){}
+            }
             MekSummary[] units = cache.getAllMeks();
 
             StringBuilder csvLine = new StringBuilder();
@@ -114,6 +127,10 @@ public final class SimplifiedCSVExportTool {
 
                 // Equipment Names
                 List<String> equipmentNames = new ArrayList<>();
+
+                if(unit.getChassis().equals("King Crab")){
+                    System.out.println("pause");
+                }
 
                 int sinkValue = 0;
 
@@ -163,9 +180,13 @@ public final class SimplifiedCSVExportTool {
                               .anyMatch(name::contains)) {
                         continue;
                     }
-                    equipmentNames.add(name);
+                    if(equipCount>1){
+                        equipmentNames.add("%s x%s".formatted(name,equipCount));
+                    }else {
+                        equipmentNames.add(name);
+                    }
                 }
-                csvLine.append(String.join(",", equipmentNames)).append(DELIM);
+                csvLine.append(String.join(", ", equipmentNames)).append(DELIM);
 
                 //ARMOR
                 csvLine.append(unit.getTotalArmor()).append(DELIM);
@@ -181,8 +202,13 @@ public final class SimplifiedCSVExportTool {
 
                 csvLine.append(sinkValue).append(DELIM);
 
+                csvLine.append(unit.getClanChassisName()).append(DELIM);
+
+                csvLine.append(unit.getOmni()).append(DELIM);
+
 
                 csvLine.append("\n");
+
                 bw.write(csvLine.toString());
             }
         } catch (FileNotFoundException e) {
