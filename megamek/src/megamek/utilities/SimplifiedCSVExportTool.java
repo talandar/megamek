@@ -27,6 +27,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -34,6 +35,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
 
+import megamek.ai.utility.EntityFeatureUtils;
 import megamek.codeUtilities.StringUtility;
 import megamek.common.*;
 import megamek.common.annotations.Nullable;
@@ -75,12 +77,14 @@ public final class SimplifiedCSVExportTool {
 
     private static final List<String> HEADERS = List.of("Chassis", "Model", "MUL ID", "Combined", "Clan",
             "Weight", "Intro Date", "Unit Type", "BV", "Rules", "Equipment", "Armor", "Structure", "Movement",
-            "Heat Sunk", "Clan Chassis Name", "Is Omnimech");
+            "Heat Sunk", "Clan Chassis Name", "Is Omnimech", "Armor Type");
 
     public static void main(String... args) {
         if (args.length > 0) {
             includeGunEmplacement = Boolean.parseBoolean(args[0]);
         }
+
+        Map<String, Set<Boolean>> typeTracksHeat = new HashMap<>();
 
         try (PrintWriter pw = new PrintWriter(FILE_NAME);
                 BufferedWriter bw = new BufferedWriter(pw)) {
@@ -97,13 +101,9 @@ public final class SimplifiedCSVExportTool {
             csvLine.append(String.join(DELIM, HEADERS)).append("\n");
             bw.write(csvLine.toString());
 
-            //DEBUG
-            Set<String> sinkTypes = new HashSet<>();
-
             for (MekSummary unit : units) {
-                if (!includeGunEmplacement && unit.getUnitType().equals("Gun Emplacement")) {
-                    continue;
-                }
+                Entity entity = unit.loadEntity();
+                typeTracksHeat.computeIfAbsent(unit.getUnitType(), k -> new HashSet<Boolean>()).add(entity.tracksHeat());
 
                 csvLine = new StringBuilder();
                 csvLine.append(unit.getChassis()).append(DELIM);
@@ -128,31 +128,10 @@ public final class SimplifiedCSVExportTool {
                 // Equipment Names
                 List<String> equipmentNames = new ArrayList<>();
 
-                if(unit.getChassis().equals("King Crab")){
-                    System.out.println("pause");
-                }
-
-                int sinkValue = 0;
-
                 for(int equipIndex = 0; equipIndex< unit.getEquipmentNames().size();equipIndex++) {
                     String name = unit.getEquipmentNames().get(equipIndex);
 
                     int equipCount = unit.getEquipmentQuantities().get(equipIndex);
-                    if (name.equals("CLDoubleHeatSink")) {
-                        sinkValue += 2 * equipCount;
-                    } else if (name.equals("ISDoubleHeatSinkPrototype")) {
-                        sinkValue += 2 * equipCount;
-                    } else if (name.equals("2 Compact Heat Sinks")) {
-                        sinkValue += 2 * equipCount;
-                    } else if (name.equals("ISDoubleHeatSink")) {
-                        sinkValue += 2 * equipCount;
-                    } else if (name.equals("Heat Sink")) {
-                        sinkValue += equipCount;
-                    } else if (name.equals("Laser Heat Sink")) {
-                        sinkValue += 2 * equipCount;
-                    } else if (name.equals("1 Compact Heat Sink")) {
-                        sinkValue += equipCount;
-                    }
 
                     // Ignore Heat Sinks
                     if(heatSinkNames.contains(name)){
@@ -200,17 +179,19 @@ public final class SimplifiedCSVExportTool {
                                         (unit.getJumpMp() <= 0 ? "-" : unit.getJumpMp());
                 csvLine.append(movement).append(DELIM);
 
-                csvLine.append(sinkValue).append(DELIM);
+                csvLine.append(entity.getHeatCapacity()).append(DELIM);
 
                 csvLine.append(unit.getClanChassisName()).append(DELIM);
 
                 csvLine.append(unit.getOmni()).append(DELIM);
 
+                csvLine.append(ArmorType.forEntity(entity).getInternalName()).append(DELIM);
 
                 csvLine.append("\n");
 
                 bw.write(csvLine.toString());
             }
+            System.out.println("done going through models");
         } catch (FileNotFoundException e) {
             logger.error(e, "Could not open file for output!");
         } catch (IOException e) {
