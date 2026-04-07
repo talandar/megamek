@@ -77,14 +77,12 @@ public final class SimplifiedCSVExportTool {
 
     private static final List<String> HEADERS = List.of("Chassis", "Model", "MUL ID", "Combined", "Clan",
             "Weight", "Intro Date", "Unit Type", "BV", "Rules", "Equipment", "Armor", "Structure", "Movement",
-            "Heat Sunk", "Clan Chassis Name", "Is Omnimech", "Armor Type");
+            "Heat Sunk", "Clan Chassis Name", "Is Omnimech");
 
     public static void main(String... args) {
         if (args.length > 0) {
             includeGunEmplacement = Boolean.parseBoolean(args[0]);
         }
-
-        Map<String, Set<Boolean>> typeTracksHeat = new HashMap<>();
 
         try (PrintWriter pw = new PrintWriter(FILE_NAME);
                 BufferedWriter bw = new BufferedWriter(pw)) {
@@ -103,7 +101,6 @@ public final class SimplifiedCSVExportTool {
 
             for (MekSummary unit : units) {
                 Entity entity = unit.loadEntity();
-                typeTracksHeat.computeIfAbsent(unit.getUnitType(), k -> new HashSet<Boolean>()).add(entity.tracksHeat());
 
                 csvLine = new StringBuilder();
                 csvLine.append(unit.getChassis()).append(DELIM);
@@ -185,13 +182,10 @@ public final class SimplifiedCSVExportTool {
 
                 csvLine.append(unit.getOmni()).append(DELIM);
 
-                csvLine.append(ArmorType.forEntity(entity).getInternalName()).append(DELIM);
-
                 csvLine.append("\n");
 
                 bw.write(csvLine.toString());
             }
-            System.out.println("done going through models");
         } catch (FileNotFoundException e) {
             logger.error(e, "Could not open file for output!");
         } catch (IOException e) {
