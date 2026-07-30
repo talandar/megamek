@@ -77,10 +77,17 @@ public enum PacketCommand {
     ENTITY_ATTACK,
 
     ENTITY_PREPHASE,
+    ENTITY_GHOST_TARGET,
     ENTITY_GTA_HEX_SELECT,
 
     /** A packet informing the receiver of an unspecified change to a unit. */
     ENTITY_UPDATE,
+
+    /**
+     * A packet carrying a gamemaster's damage editor edits as a {@link megamek.common.units.DamageEditSpec}, for
+     * the server to apply to its own copy of the unit.
+     */
+    ENTITY_DAMAGE_EDIT,
 
     /** A packet instructing the Client to forget the unit of the given id as it is / has become invisible (SBF). */
     UNIT_INVISIBLE,
@@ -93,6 +100,7 @@ public enum PacketCommand {
     ENTITY_SENSOR_CHANGE,
     ENTITY_SINKS_CHANGE,
     ENTITY_ACTIVATE_HIDDEN,
+    ENTITY_DEPLOY_BRIDGE,
     ENTITY_SYSTEM_MODE_CHANGE,
     FORCE_UPDATE,
     FORCE_ADD,
@@ -144,6 +152,7 @@ public enum PacketCommand {
     SENDING_MAP_SETTINGS,
     END_OF_GAME,
     DEPLOY_MINEFIELDS,
+
     REVEAL_MINEFIELD,
     REMOVE_MINEFIELD,
     SENDING_MINEFIELDS,
@@ -204,7 +213,49 @@ public enum PacketCommand {
     ADD_TEMPORARY_ECM_FIELD,
 
     /** A packet syncing all temporary ECM fields to clients (replaces existing list). */
-    SYNC_TEMPORARY_ECM_FIELDS;
+    SYNC_TEMPORARY_ECM_FIELDS,
+
+    /** A packet updating hex locations being cleared by saws (for board view rendering). */
+    UPDATE_CUT_HEXES,
+
+    // NOTE: Packet marshalling uses PacketCommand.ordinal() as the wire identifier
+    // (see NativeSerializationMarshaller), so new commands MUST be appended here at the
+    // end to keep existing ordinals stable. Never insert new constants mid-enum.
+
+    /** A Client to Server packet carrying the hex coordinates a player is placing as fortified hexes. */
+    DEPLOY_FORTIFICATIONS,
+
+    /**
+     * A Server to Client packet instructing the Client to show a transient toast notification on the board view, with a
+     * severity level, message text and an optional acting unit (for its icon).
+     */
+    SEND_TOAST,
+
+    /**
+     * A Client to Server packet carrying a player's "reveal all artillery rounds" testing preference (a boolean). When
+     * set, the server includes enemy artillery attacks in that player's artillery packet so the Rounds in the Air view
+     * can show both sides. Bots never send it, so their filtered view - and their decisions - are unchanged.
+     */
+    CLIENT_ARTILLERY_REVEAL,
+
+    /**
+     * A Server to Client packet carrying the running vote among the players - a gamemaster request - as a
+     * {@link megamek.common.voting.Poll}, sent whenever the vote is called, receives a ballot, or resolves.
+     */
+    GAME_MASTER_POLL,
+
+    /**
+     * A Server to Client packet carrying the current state of all player-controlled industrial elevators
+     * (platform levels, call queues) so clients can render platforms and validate elevator moves.
+     */
+    UPDATE_INDUSTRIAL_ELEVATORS,
+
+    /**
+     * A Client to Server packet requesting that the server build the game board from the current map settings
+     * during the lobby and broadcast it to all clients, so that everyone sees the battlefield that will actually
+     * be played before the game starts.
+     */
+    LOBBY_GENERATE_BOARD;
     //endregion Enum Declarations
 
     //region Boolean Comparison Methods
@@ -237,6 +288,7 @@ public enum PacketCommand {
         return this == CFR_TAG_TARGET;
     }
 
+    @Deprecated(since = "0.51.0", forRemoval = true)
     public boolean isGameVictoryEvent() {
         return this == GAME_VICTORY_EVENT;
     }

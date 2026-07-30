@@ -273,6 +273,7 @@ public enum MiscTypeFlag implements EquipmentFlag {
 
     F_BA_MEA, // Flag for BattleArmor Modular Equipment Adaptor
     F_INF_EQUIPMENT, // Flag for Infantry Equipment
+    F_ANTI_MEK_GEAR,
 
     F_SCM,
 
@@ -427,5 +428,8 @@ public enum MiscTypeFlag implements EquipmentFlag {
     S_MARITIME_LIFEBOAT,
     S_MARITIME_ESCAPE_POD,
     S_ATMOSPHERIC_LIFEBOAT,
+
+    // Flag for LAM fuel tanks
+    F_LAM_FUEL_TANK,
 
 }

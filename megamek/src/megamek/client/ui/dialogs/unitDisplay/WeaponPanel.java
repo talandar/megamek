@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015-2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2015-2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -82,6 +82,7 @@ import megamek.common.equipment.AmmoType.AmmoTypeEnum;
 import megamek.common.equipment.AmmoType.Munitions;
 import megamek.common.equipment.HandheldWeapon;
 import megamek.common.equipment.Mounted;
+import megamek.common.equipment.TrainAmmoSharing;
 import megamek.common.equipment.WeaponMounted;
 import megamek.common.equipment.WeaponType;
 import megamek.common.game.Game;
@@ -1444,9 +1445,9 @@ public class WeaponPanel extends PicMap implements ListSelectionListener, Action
         if ((weaponType instanceof InfantryWeapon infantryType) && !weaponType.hasFlag(WeaponType.F_TAG)) {
             wDamageTrooperL.setVisible(true);
             wDamageTrooperR.setVisible(true);
-            if (entity.isConventionalInfantry()) {
+            if (entity instanceof ConvInfantry infantry) {
                 wDamageTrooperR.setText(Double.toString((double) Math.round(
-                      ((Infantry) entity).getDamagePerTrooper() * 1000) / 1000));
+                      infantry.getDamagePerTrooper() * 1000) / 1000));
             } else {
                 wDamageTrooperR.setText(Double.toString(infantryType.getInfantryDamage()));
             }
@@ -1934,20 +1935,8 @@ public class WeaponPanel extends PicMap implements ListSelectionListener, Action
         } else {
 
             vAmmo = new ArrayList<>();
-            // Ammo sharing between adjacent trailers
-            List<AmmoMounted> fullAmmoList = new ArrayList<>(entity.getAmmo());
-            if (entity.getTowedBy() != Entity.NONE) {
-                Entity ahead = entity.getGame().getEntity(entity.getTowedBy());
-                if (ahead != null) {
-                    fullAmmoList.addAll(ahead.getAmmo());
-                }
-            }
-            if (entity.getTowing() != Entity.NONE) {
-                Entity behind = entity.getGame().getEntity(entity.getTowing());
-                if (behind != null) {
-                    fullAmmoList.addAll(behind.getAmmo());
-                }
-            }
+            // Ammo sharing between adjacent trailers. The server validates against this same rule.
+            List<AmmoMounted> fullAmmoList = TrainAmmoSharing.getSharedAmmo(entity);
             int newSelectedIndex = -1;
             int i = 0;
             for (AmmoMounted ammo : fullAmmoList) {
@@ -2589,21 +2578,27 @@ public class WeaponPanel extends PicMap implements ListSelectionListener, Action
                         // FIXME: Consider new AmmoType::equals / BombType::equals
                         if (bWeapon.getType().equals(sWeapon.getType())) {
                             entity.loadWeapon(bWeapon, mAmmo);
-                            // Alert the server of the update.
+                            // Alert the server of the update. The ammo bin may belong to a connected trailer, so
+                            // its equipment number must be resolved against its own carrier.
+                            Entity ammoCarrier = mAmmo.getEntity();
                             clientgui.getClient().sendAmmoChange(
                                   entity.getId(),
                                   entity.getEquipmentNum(bWeapon),
-                                  entity.getEquipmentNum(mAmmo),
+                                  ammoCarrier.getEquipmentNum(mAmmo),
+                                  ammoCarrier.getId(),
                                   0);
                         }
                     }
                 }
             } else {
                 entity.loadWeapon(mWeapon, mAmmo);
-                // Alert the server of the update.
+                // Alert the server of the update. The ammo bin may belong to a connected trailer, so its
+                // equipment number must be resolved against its own carrier.
+                Entity ammoCarrier = mAmmo.getEntity();
                 clientgui.getClient().sendAmmoChange(entity.getId(),
                       entity.getEquipmentNum(mWeapon),
-                      entity.getEquipmentNum(mAmmo),
+                      ammoCarrier.getEquipmentNum(mAmmo),
+                      ammoCarrier.getId(),
                       0);
             }
 
