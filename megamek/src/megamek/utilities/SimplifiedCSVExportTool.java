@@ -45,6 +45,7 @@ import megamek.common.loaders.MekFileParser;
 import megamek.common.loaders.MekSummary;
 import megamek.common.loaders.MekSummaryCache;
 import megamek.common.templates.TROView;
+import megamek.common.units.ConvInfantry;
 import megamek.common.units.Entity;
 import megamek.common.units.Infantry;
 import megamek.common.units.LAMPilot;
@@ -184,9 +185,6 @@ public final class SimplifiedCSVExportTool {
                 csvLine.append(entity.getHeatCapacity()).append(DELIM);
 
                 csvLine.append(entity.isCanon()).append(DELIM);
-                if(entity.isCanon() || unit.isCanon()){
-                    System.out.println("stop");
-                }
 
                 csvLine.append(unit.getOmni()).append(DELIM);
 
@@ -208,7 +206,7 @@ public final class SimplifiedCSVExportTool {
 
     private static String getPSModifier(Entity entity){
         if (entity.isUncrewed()) {
-            if (entity.isConventionalInfantry() && !((Infantry) entity).hasAntiMekGear()) {
+            if (entity instanceof ConvInfantry convInfantry && !convInfantry.hasAntiMekGear()) {
                 return "FIXED_8_PS";
             } else {
                 return "FIXED_5_PS";
@@ -216,9 +214,7 @@ public final class SimplifiedCSVExportTool {
         } else if (((entity instanceof Infantry) && (!((Infantry) entity).canMakeAntiMekAttacks())) ||
               (entity instanceof ProtoMek)) {
             return "FIXED_5_PS";
-        } else if (entity.isConventionalInfantry()
-              && (entity instanceof Infantry)
-              && !((Infantry) entity).hasAntiMekGear()) {
+        } else if ((entity instanceof ConvInfantry convInfantry) && !convInfantry.hasAntiMekGear()) {
             return "FIXED_8_PS";
         }
         return "STANDARD";
