@@ -47,6 +47,8 @@ import megamek.common.loaders.MekSummaryCache;
 import megamek.common.templates.TROView;
 import megamek.common.units.Entity;
 import megamek.common.units.Infantry;
+import megamek.common.units.LAMPilot;
+import megamek.common.units.ProtoMek;
 import megamek.logging.MMLogger;
 
 /**
@@ -77,7 +79,7 @@ public final class SimplifiedCSVExportTool {
 
     private static final List<String> HEADERS = List.of("Chassis", "Model", "MUL ID", "Combined", "Clan",
             "Weight", "Intro Date", "Unit Type", "BV", "Rules", "Equipment", "Armor", "Structure", "Movement",
-            "Heat Sunk", "Clan Chassis Name", "Is Omnimech");
+            "Heat Sunk", "Is Canon", "Is Omnimech", "PS Modifier");
 
     public static void main(String... args) {
         if (args.length > 0) {
@@ -102,11 +104,15 @@ public final class SimplifiedCSVExportTool {
             for (MekSummary unit : units) {
                 Entity entity = unit.loadEntity();
 
+                String unitChassisWithClan = unit.getClanChassisName().isBlank() ? unit.getChassis() :
+                      unit.getChassis() + " (" + unit.getClanChassisName()+")";
                 csvLine = new StringBuilder();
-                csvLine.append(unit.getChassis()).append(DELIM);
+                csvLine.append(unitChassisWithClan).append(DELIM);
                 csvLine.append(unit.getModel()).append(DELIM);
                 csvLine.append(unit.getMulId()).append(DELIM);
-                csvLine.append(unit.getChassis()).append(" ").append(unit.getModel()).append(DELIM);
+                String fullName = unitChassisWithClan + " " + unit.getModel();
+
+                csvLine.append(fullName).append(DELIM);
 
                 csvLine.append(!unit.getTechBase().equals("Inner Sphere")).append(DELIM);
 
@@ -120,7 +126,6 @@ public final class SimplifiedCSVExportTool {
                 csvLine.append(unit.getBV()).append(DELIM);
                 // Unit Tech Level
                 csvLine.append(unit.getLevel()).append(DELIM);
-
 
                 // Equipment Names
                 List<String> equipmentNames = new ArrayList<>();
@@ -178,19 +183,45 @@ public final class SimplifiedCSVExportTool {
 
                 csvLine.append(entity.getHeatCapacity()).append(DELIM);
 
-                csvLine.append(unit.getClanChassisName()).append(DELIM);
+                csvLine.append(entity.isCanon()).append(DELIM);
+                if(entity.isCanon() || unit.isCanon()){
+                    System.out.println("stop");
+                }
 
                 csvLine.append(unit.getOmni()).append(DELIM);
+
+                csvLine.append(getPSModifier(entity)).append(DELIM);
+
+                csvLine.append(unit.getFullAccurateUnitType()).append(DELIM);
 
                 csvLine.append("\n");
 
                 bw.write(csvLine.toString());
+
             }
         } catch (FileNotFoundException e) {
             logger.error(e, "Could not open file for output!");
         } catch (IOException e) {
             logger.error(e, "IO Exception");
         }
+    }
+
+    private static String getPSModifier(Entity entity){
+        if (entity.isUncrewed()) {
+            if (entity.isConventionalInfantry() && !((Infantry) entity).hasAntiMekGear()) {
+                return "FIXED_8_PS";
+            } else {
+                return "FIXED_5_PS";
+            }
+        } else if (((entity instanceof Infantry) && (!((Infantry) entity).canMakeAntiMekAttacks())) ||
+              (entity instanceof ProtoMek)) {
+            return "FIXED_5_PS";
+        } else if (entity.isConventionalInfantry()
+              && (entity instanceof Infantry)
+              && !((Infantry) entity).hasAntiMekGear()) {
+            return "FIXED_8_PS";
+        }
+        return "STANDARD";
     }
 
     public static @Nullable Entity loadEntity(File f, String entityName) {
