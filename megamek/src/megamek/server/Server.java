@@ -59,16 +59,18 @@ import java.util.function.Consumer;
 import java.util.zip.GZIPInputStream;
 
 import com.thoughtworks.xstream.XStream;
+import jakarta.annotation.Nullable;
 import megamek.MMConstants;
 import megamek.SuiteConstants;
 import megamek.Version;
+import megamek.client.ui.Messages;
 import megamek.client.ui.util.PlayerColour;
 import megamek.codeUtilities.StringUtility;
 import megamek.common.Player;
-import megamek.common.annotations.Nullable;
 import megamek.common.board.Board;
 import megamek.common.commandLine.AbstractCommandLineParser.ParseException;
 import megamek.common.equipment.Minefield;
+import megamek.common.equipment.ObjectiveMarker;
 import megamek.common.game.Game;
 import megamek.common.game.IGame;
 import megamek.common.icons.Camouflage;
@@ -226,10 +228,9 @@ public class Server implements Runnable {
 
     public static final int SERVER_CONN = Integer.MIN_VALUE;
 
-    private final ConnectionListener connectionListener = new ConnectionListener() {
+    private final PacketPauseGate pauseGate = new PacketPauseGate();
 
-        private boolean isPaused = false;
-        private final List<ReceivedPacket> pausedWaitingList = new ArrayList<>();
+    private final ConnectionListener connectionListener = new ConnectionListener() {
 
         /**
          * Called when it is sensed that a connection has terminated.
@@ -254,7 +255,7 @@ public class Server implements Runnable {
 
             // if there's a player for this connection, remove it too
             Player player = getPlayer(conn.getId());
-            if (null != player) {
+            if (player != null) {
                 Server.this.disconnected(player);
             }
         }
@@ -275,28 +276,24 @@ public class Server implements Runnable {
                     handle(rp.getConnectionId(), rp.getPacket());
                     break;
                 case PAUSE:
-                    if (!isPaused) {
+                    if (pauseGate.pause()) {
                         LOGGER.info("Pause packet received - pausing packet handling");
                         sendServerChat("Game is paused.");
                     }
-                    isPaused = true;
                     break;
                 case UNPAUSE:
-                    if (isPaused) {
+                    if (pauseGate.isPaused()) {
                         LOGGER.info("Unpause packet received - resuming packet handling");
                         sendServerChat("Game is resumed.");
                     }
-                    isPaused = false;
+                    List<ReceivedPacket> releasedPackets = pauseGate.unpause();
                     synchronized (packetQueue) {
-                        packetQueue.addAll(pausedWaitingList);
+                        packetQueue.addAll(releasedPackets);
                         packetQueue.notifyAll();
                     }
-                    pausedWaitingList.clear();
                     break;
                 default:
-                    if (isPaused) {
-                        pausedWaitingList.add(rp);
-                    } else {
+                    if (!pauseGate.holdIfPaused(rp)) {
                         synchronized (packetQueue) {
                             packetQueue.add(rp);
                             packetQueue.notifyAll();
@@ -607,7 +604,7 @@ public class Server implements Runnable {
         }
 
         Player gamePlayer = getGame().getPlayer(connId);
-        if (null != gamePlayer) {
+        if (gamePlayer != null) {
             gamePlayer.setColour(player.getColour());
             gamePlayer.setStartingPos(player.getStartingPos());
             gamePlayer.setStartWidth(player.getStartWidth());
@@ -618,12 +615,12 @@ public class Server implements Runnable {
             gamePlayer.setStartingAnySEy(player.getStartingAnySEy());
             gamePlayer.setTeam(player.getTeam());
             gamePlayer.setCamouflage(player.getCamouflage().clone());
-            
+
             // minefields
             for (int minefieldIndex = 0; minefieldIndex < Minefield.TYPE_SIZE; minefieldIndex++) {
-            	gamePlayer.setMinefieldCount(minefieldIndex, player.getMinefieldCount(minefieldIndex));
+                gamePlayer.setMinefieldCount(minefieldIndex, player.getMinefieldCount(minefieldIndex));
             }
-            
+
             gamePlayer.setNbrFortifiedHexes(player.getNbrFortifiedHexes());
             if (gamePlayer.getConstantInitBonus() != player.getConstantInitBonus()) {
                 sendServerChat("Player " +
@@ -637,6 +634,9 @@ public class Server implements Runnable {
             gamePlayer.setConstantInitBonus(player.getConstantInitBonus());
             gamePlayer.setEmail(player.getEmail());
             gamePlayer.setGroundObjectsToPlace(new ArrayList<>(player.getGroundObjectsToPlace()));
+            // the owner of a victory hex designation drives its color, visibility and reset return, so it
+            // is always the player whose list carried it - never a client-supplied value
+            ObjectiveMarker.claimDesignations(gamePlayer.getGroundObjectsToPlace(), gamePlayer.getId());
         }
     }
 
@@ -668,20 +668,52 @@ public class Server implements Runnable {
         return oldName;
     }
 
+    /**
+     * Tells every player already in the game that someone was refused for running a different version. Only the
+     * name is passed on, never the address: that stays in the server log for the host.
+     *
+     * <p>The refused connection is still pending, so it is not among the connections this reaches.</p>
+     *
+     * @param refusedConnection the connection that was refused
+     *
+     * @author Illiani
+     * @since 0.51.01
+     */
+    private void notifyPlayersOfRefusedConnection(RefusedConnection refusedConnection) {
+        send(new Packet(PacketCommand.PLAYER_REFUSED_DIFFERENT_VERSION,
+              refusedConnection.playerName(),
+              refusedConnection.clientVersion(),
+              refusedConnection.serverVersion()));
+    }
+
     private boolean receivePlayerVersion(Packet packet, int connId) throws InvalidPacketDataException {
         final Version version = (Version) packet.getObject(0);
+        final Version serverVersion = SuiteConstants.VERSION;
 
-        if (!SuiteConstants.VERSION.is(version)) {
+        if (!serverVersion.is(version)) {
+            // Clients from 0.51.01 onwards send their player name alongside the version, so the other players can be
+            // told who was refused. Older clients send the version alone. The address goes to the server log only,
+            // never to the other players.
+            final AbstractConnection pendingConnection = getPendingConnection(connId);
+            final RefusedConnection refusedConnection = RefusedConnection.fromReceived(packet.getObject(1),
+                  (pendingConnection == null) ? null : pendingConnection.getInetAddress(),
+                  version,
+                  serverVersion);
+            final String playerName = refusedConnection.hasPlayerName()
+                  ? refusedConnection.playerName()
+                  : "unknown player";
+
             final String message = String.format("Client/Server Version Mismatch -- Client: %s, Server: %s",
                   version,
-                  SuiteConstants.VERSION);
-            LOGGER.error(message);
+                  serverVersion);
+            LOGGER.error("Refused connection from {} ({}): {}", playerName, refusedConnection.address(), message);
 
-            final Player player = getPlayer(connId);
             sendServerChat(String.format("For %s, Server reports:%s%s",
-                  ((player == null) ? "unknown player" : player.getName()),
+                  playerName,
                   System.lineSeparator(),
                   message));
+
+            notifyPlayersOfRefusedConnection(refusedConnection);
             return false;
         }
 
@@ -734,7 +766,7 @@ public class Server implements Runnable {
 
         // if it is not the lounge phase, this player becomes an observer
         Player player = getPlayer(connId);
-        if (!getGame().getPhase().isLounge() && (null != player) && (getGame().getEntitiesOwnedBy(player) < 1)) {
+        if (!getGame().getPhase().isLounge() && (player != null) && (getGame().getEntitiesOwnedBy(player) < 1)) {
             player.setObserver(true);
         }
 
@@ -775,7 +807,7 @@ public class Server implements Runnable {
 
         // Get the player *again*, because they may have disconnected.
         player = getPlayer(connId);
-        if (null != player) {
+        if (player != null) {
             String who = String.format("%s connected from %s", player.getName(), getClient(connId).getInetAddress());
             message = String.format("s: player #%d, %s", connId, who);
             LOGGER.info(message);
@@ -896,6 +928,23 @@ public class Server implements Runnable {
     }
 
     /**
+     * Ends any pause as the game returns to the lobby. A pause holds every incoming packet except chat, and the reset
+     * command is chat, so a game reset while paused used to reach the lobby still paused: Done presses, unit changes
+     * and settings were all held and never acted on. The held packets belong to the game that just ended and are
+     * thrown away.
+     */
+    public void endPauseForLobby() {
+        if (!pauseGate.isPaused()) {
+            LOGGER.debug("[LobbyReset] entering the lobby: the game was not paused");
+            return;
+        }
+        int discardedPackets = pauseGate.endPauseForLobby();
+        LOGGER.info("[LobbyReset] the game was paused when it returned to the lobby: resumed packet handling and "
+              + "discarded {} packet(s) held from the old game", discardedPackets);
+        sendServerChat(Messages.getString("Server.pauseEndedByLobby"));
+    }
+
+    /**
      * send a packet to the connection tells it load a locally saved game
      *
      * @param connId The <code>int</code> connection id to send to
@@ -948,6 +997,7 @@ public class Server implements Runnable {
 
             XStream xStream = SerializationHelper.getLoadSaveGameXStream();
             newGame = (Game) xStream.fromXML(gzi);
+            newGame.initializeAfterLoad();
         } catch (Exception e) {
             message = String.format("Unable to load file: %s", f);
             LOGGER.error(e, message);
@@ -1171,8 +1221,7 @@ public class Server implements Runnable {
      */
     private void transmitPlayerConnect(AbstractConnection connection) {
         for (Player player : getGame().getPlayersList()) {
-            var connectionId = connection.getId();
-            connection.send(createPlayerConnectPacket(player, player.getId() != connectionId));
+            connection.send(createPlayerConnectPacket(player, connection.getId()));
         }
     }
 
@@ -1181,24 +1230,46 @@ public class Server implements Runnable {
      */
     private void transmitPlayerConnect(Player player) {
         for (var connection : connections) {
-            var playerId = player.getId();
-            connection.send(createPlayerConnectPacket(player, playerId != connection.getId()));
+            connection.send(createPlayerConnectPacket(player, connection.getId()));
         }
     }
 
     /**
-     * Creates a packet informing that the player has connected
+     * Creates a packet informing that the player has connected. When the packet is for another player's
+     * connection, the player data is sent as a redacted copy (see {@link #redactedCopyFor(Player, int)}).
+     *
+     * @param player                the player whose data is sent
+     * @param recipientConnectionId the id of the connection the packet is sent to
      */
-    private Packet createPlayerConnectPacket(Player player, boolean isPrivate) {
+    private Packet createPlayerConnectPacket(Player player, int recipientConnectionId) {
         var playerId = player.getId();
-        var destPlayer = player;
-        if (isPrivate) {
-            // Sending the player's data to another player's
-            // connection, need to redact any private data
-            destPlayer = player.copy();
-            destPlayer.redactPrivateData();
-        }
+        var destPlayer = (playerId == recipientConnectionId) ? player : redactedCopyFor(player, recipientConnectionId);
         return new Packet(PacketCommand.PLAYER_ADD, playerId, destPlayer);
+    }
+
+    /**
+     * Creates the copy of a player's data that may be sent to another player's connection: private data is
+     * redacted, and lobby objective designations (victory hexes) are stripped unless the recipient is allowed to
+     * see them - they are a side's mission plan, visible only to the owner's team and a game master (see
+     * {@link ObjectiveMarker#isDesignationVisibleTo(Player, Player)}).
+     *
+     * @param player                the player whose data is being sent
+     * @param recipientConnectionId the id of the connection (= player id) receiving the data
+     *
+     * @return the redacted copy to send
+     */
+    private Player redactedCopyFor(Player player, int recipientConnectionId) {
+        Player destPlayer = player.copy();
+        destPlayer.redactPrivateData();
+        Player recipient = getGame().getPlayer(recipientConnectionId);
+        boolean designationsVisible = (recipient != null)
+              && ObjectiveMarker.isDesignationVisibleTo(player, recipient);
+        // a player's other carryables-to-place (briefcases etc.) were never sent to other players before
+        // the ground objects rode the player copy - keep them private: the copy carries only the victory
+        // hex designations the recipient is allowed to see
+        destPlayer.getGroundObjectsToPlace().removeIf(carryable ->
+              !(carryable instanceof ObjectiveMarker) || !designationsVisible);
+        return destPlayer;
     }
 
     /**
@@ -1207,14 +1278,7 @@ public class Server implements Runnable {
     void transmitPlayerUpdate(Player player) {
         for (var connection : connections) {
             var playerId = player.getId();
-            var destPlayer = player;
-
-            if (playerId != connection.getId()) {
-                // Sending the player's data to another player's
-                // connection, need to redact any private data
-                destPlayer = player.copy();
-                destPlayer.redactPrivateData();
-            }
+            var destPlayer = (playerId == connection.getId()) ? player : redactedCopyFor(player, connection.getId());
             connection.send(new Packet(PacketCommand.PLAYER_UPDATE, playerId, destPlayer));
         }
     }
@@ -1329,7 +1393,7 @@ public class Server implements Runnable {
         Player player = getGame().getPlayer(connId);
 
         // Check player. Please note, the connection may be pending.
-        if ((null == player) && (null == getPendingConnection(connId))) {
+        if ((player == null) && (getPendingConnection(connId) == null)) {
             String message = String.format("Server does not recognize player at connection %d", connId);
             LOGGER.error(message);
             return;
@@ -1363,9 +1427,20 @@ public class Server implements Runnable {
                     receivePlayerName(packet, connId);
                     break;
                 case PLAYER_UPDATE:
+                    Player playerBeforeUpdate = getPlayer(connId);
+                    int teamBeforeUpdate = (playerBeforeUpdate != null)
+                          ? playerBeforeUpdate.getTeam()
+                          : Player.TEAM_NONE;
                     receivePlayerInfo(packet, connId);
                     validatePlayerInfo(connId);
-                    transmitPlayerUpdate(getPlayer(connId));
+                    Player updatedPlayer = getPlayer(connId);
+                    if ((updatedPlayer != null) && (updatedPlayer.getTeam() != teamBeforeUpdate)) {
+                        // a team change alters who may see whose victory hex designations - re-send
+                        // everyone so each client gets the data its new relations allow
+                        transmitAllPlayerUpdates();
+                    } else {
+                        transmitPlayerUpdate(getPlayer(connId));
+                    }
                     break;
                 case CHAT:
                     String chat = packet.getStringValue(0);
@@ -1399,7 +1474,11 @@ public class Server implements Runnable {
                 case LOAD_GAME:
                     try {
                         sendServerChat(getPlayer(connId).getName() + " loaded a new game.");
-                        setGame((Game) packet.getObject(0));
+                        Game receivedGame = (Game) packet.getObject(0);
+                        if (receivedGame != null) {
+                            receivedGame.initializeAfterLoad();
+                        }
+                        setGame(receivedGame);
                         for (AbstractConnection conn : connections) {
                             sendCurrentInfo(conn.getId());
                         }

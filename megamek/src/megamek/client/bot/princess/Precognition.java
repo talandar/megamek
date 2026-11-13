@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import jakarta.annotation.Nullable;
 import megamek.client.bot.princess.geometry.CoordFacingCombo;
 import megamek.common.ECMInfo;
 import megamek.common.Hex;
@@ -47,15 +48,7 @@ import megamek.common.Player;
 import megamek.common.Report;
 import megamek.common.SpecialHexDisplay;
 import megamek.common.TagInfo;
-import megamek.common.actions.ArtilleryAttackAction;
-import megamek.common.actions.AttackAction;
-import megamek.common.actions.ClubAttackAction;
-import megamek.common.actions.DodgeAction;
-import megamek.common.actions.EntityAction;
-import megamek.common.actions.FlipArmsAction;
-import megamek.common.actions.TorsoTwistAction;
-import megamek.common.actions.WeaponAttackAction;
-import megamek.common.annotations.Nullable;
+import megamek.common.actions.*;
 import megamek.common.board.Board;
 import megamek.common.board.BoardLocation;
 import megamek.common.board.Coords;
@@ -337,6 +330,7 @@ public class Precognition implements Runnable {
                 case ILLEGAL_CLIENT_VERSION:
                 case LOCAL_PN:
                 case PRINCESS_SETTINGS:
+                case PRINCESS_DISHONORED:
                 case FORCE_UPDATE:
                 case FORCE_DELETE:
                 case SENDING_REPORTS_SPECIAL:
@@ -349,6 +343,9 @@ public class Precognition implements Runnable {
                 case SEND_TOAST:
                 case UPDATE_CUT_HEXES:
                 case SYNC_TEMPORARY_ECM_FIELDS:
+                case TEAM_INITIATIVE:
+                case PLAYER_PING:
+                case PLAYER_REFUSED_DIFFERENT_VERSION:
                     LOGGER.debug("Intentionally ignoring PacketCommand: {}", c.command().name());
                     break;
                 default:
@@ -451,33 +448,53 @@ public class Precognition implements Runnable {
     @Override
     public void run() {
         try {
-            // todo There's probably a better way to handle this than a loop that only exits
-            // on an error.
             while (!getDone().get()) {
-                if (!getEventsToProcess().isEmpty()) {
-                    processGameEvents();
-                    ecmInfo = ComputeECM.computeAllEntitiesECMInfo(
-                          getGame().getEntitiesVector());
-                } else if (!getDirtyUnits().isEmpty()) {
-                    Integer entityId = getDirtyUnits().pollFirst();
-                    if (entityId != null) {
-                        Entity entity = getGame().getEntity(entityId);
-                        if ((entity != null) && isEntityOnMap(entity)) {
-                            unPause();
-                            // Entity toString() is only evaluated when DEBUG is enabled; see ensureUpToDate.
-                            LOGGER.debug("run = recalculating paths for {}", entity);
-                            getPathEnumerator().recalculateMovesFor(entity);
-                            LOGGER.debug("run = finished recalculating paths for {}", entity);
-                        }
-
-                    }
-                } else if (getWaitWhenDone().get()) {
-                    waitForUnpause(); // paused for a reason
-                } else {
-                    waitForUnpause(); // idling because there's nothing to do
+                try {
+                    runOnePass();
+                } catch (Exception exception) {
+                    // One failed pass must not end the thread. A movement turn waits for this thread to pause, so a
+                    // thread that died here froze the game with nothing in the log (issue #9476). The event or unit
+                    // that failed has already been taken off its queue, so the next pass moves on.
+                    LOGGER.error(exception, "Precognition pass failed for {}; carrying on", getOwner().getName());
                 }
             }
-        } catch (Exception ignored) {
+        } catch (Error error) {
+            // Mark the thread done so a movement turn stops waiting for it, then let the Error end the thread
+            LOGGER.error(error, "Precognition for {} stopped unexpectedly; movement turns will no longer wait for it",
+                  getOwner().getName());
+            getDone().set(true);
+            throw error;
+        }
+    }
+
+    private void runOnePass() {
+        if (!getEventsToProcess().isEmpty()) {
+            processGameEvents();
+            // The packet handler changes the entity list under GAME_LOCK; reading it without the lock can throw.
+            // Copy the list under the lock and run the (expensive) ECM computation after releasing it.
+            List<Entity> entities;
+            GAME_LOCK.lock();
+            try {
+                entities = new ArrayList<>(getGame().getEntitiesVector());
+            } finally {
+                GAME_LOCK.unlock();
+            }
+            ecmInfo = ComputeECM.computeAllEntitiesECMInfo(entities);
+        } else if (!getDirtyUnits().isEmpty()) {
+            Integer entityId = getDirtyUnits().pollFirst();
+            if (entityId != null) {
+                Entity entity = getGame().getEntity(entityId);
+                if ((entity != null) && isEntityOnMap(entity)) {
+                    unPause();
+                    // Entity toString() is only evaluated when DEBUG is enabled; see ensureUpToDate.
+                    LOGGER.debug("run = recalculating paths for {}", entity);
+                    getPathEnumerator().recalculateMovesFor(entity);
+                    LOGGER.debug("run = finished recalculating paths for {}", entity);
+                }
+            }
+        } else {
+            // Either paused for a move, or idle with nothing to do
+            waitForUnpause();
         }
     }
 
@@ -923,8 +940,23 @@ public class Precognition implements Runnable {
                 if (!isCharge) {
                     game.addAction(ea);
                 } else {
-                    if (ea instanceof AttackAction attackAction) {
-                        game.addCharge(attackAction);
+                    // This should work for Charge, DFA, and RAM attacks.
+                    if (ea instanceof DisplacementAttackAction) {
+                        Entity chargingUnit = game.getEntity(ea.getEntityId());
+                        if (chargingUnit != null) {
+                            chargingUnit.setDisplacementAttack((DisplacementAttackAction) ea);
+                        }
+                        game.addDisplacementAttack((AttackAction) ea);
+                    }
+                    if (ea instanceof RamAttackAction) {
+                        Entity rammingUnit = game.getEntity(ea.getEntityId());
+                        if (rammingUnit != null) {
+                            rammingUnit.setRamming(true);
+                        }
+                        game.addRam((AttackAction) ea);
+                    }
+                    if (ea instanceof TeleMissileAttackAction) {
+                        game.addTeleMissileAttack((AttackAction) ea);
                     }
                 }
             }

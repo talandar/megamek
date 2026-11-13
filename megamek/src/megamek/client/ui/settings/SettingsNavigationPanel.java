@@ -32,9 +32,11 @@
  */
 package megamek.client.ui.settings;
 
+import static megamek.client.ui.WrapLayout.wordWrap;
 import static megamek.client.ui.util.FontHandler.symbolIcon;
 
 import java.awt.BorderLayout;
+import java.awt.CardLayout;
 import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
@@ -44,16 +46,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.function.Consumer;
-import javax.swing.BorderFactory;
-import javax.swing.JButton;
-import javax.swing.JLabel;
-import javax.swing.JPanel;
-import javax.swing.JScrollPane;
-import javax.swing.JTextField;
-import javax.swing.JTree;
-import javax.swing.ScrollPaneConstants;
-import javax.swing.SwingConstants;
-import javax.swing.UIManager;
+import javax.swing.*;
 import javax.swing.border.Border;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
@@ -62,8 +55,8 @@ import javax.swing.tree.DefaultTreeCellRenderer;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
 
+import jakarta.annotation.Nullable;
 import megamek.client.ui.util.UIUtil;
-import megamek.common.annotations.Nullable;
 import megamek.common.ui.FastJScrollPane;
 
 /** Searchable tree navigation for a settings pane. */
@@ -72,6 +65,8 @@ public class SettingsNavigationPanel extends JPanel {
 
     private static final int CONTENT_GAP = 6;
     private static final int CONTROL_GAP = 4;
+    private static final String NAVIGATION_TREE_CARD = "navigationTree";
+    private static final String SEARCHING_CARD = "searching";
 
     private final List<SettingsRoute> routes;
     private final Consumer<SettingsRoute> routeSelectionListener;
@@ -79,9 +74,14 @@ public class SettingsNavigationPanel extends JPanel {
     private final JTextField filterField = new JTextField();
     private final JLabel filterStatusLabel = new JLabel();
     private final JTree navigationTree = new JTree();
+    private final CardLayout navigationContentLayout = new CardLayout();
+    private final JPanel navigationContent = new JPanel(navigationContentLayout);
+    private final JLabel searchingLabel = new JLabel();
     private SettingsRoute currentRoute;
     private boolean syncingSelection;
+    private boolean searchInProgress;
     private Runnable searchIndexInitializer;
+    private Consumer<String> filterChangeListener = filter -> { };
 
     public SettingsNavigationPanel(List<SettingsRoute> routes, Consumer<SettingsRoute> routeSelectionListener,
           SettingsNavigationText text) {
@@ -108,6 +108,12 @@ public class SettingsNavigationPanel extends JPanel {
               ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
               ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
         navigationScrollPane.setName("settingsNavigationScrollPane");
+                searchingLabel.setName("lblSettingsSearching");
+                searchingLabel.setText(text.searching());
+                searchingLabel.setHorizontalAlignment(SwingConstants.CENTER);
+                navigationContent.setName("settingsNavigationContent");
+                navigationContent.add(navigationScrollPane, NAVIGATION_TREE_CARD);
+                navigationContent.add(searchingLabel, SEARCHING_CARD);
 
         int controlGap = UIUtil.scaleForGUI(CONTROL_GAP);
         JPanel searchRow = new JPanel(new BorderLayout(controlGap, 0));
@@ -122,14 +128,14 @@ public class SettingsNavigationPanel extends JPanel {
         filterPanel.add(searchRow, BorderLayout.NORTH);
         filterPanel.add(filterStatusLabel, BorderLayout.SOUTH);
         add(filterPanel, BorderLayout.NORTH);
-        add(navigationScrollPane, BorderLayout.CENTER);
+        add(navigationContent, BorderLayout.CENTER);
         buildNavigationTree("");
     }
 
     private void configureFilterField() {
         filterField.setName("txtSettingsFilter");
         filterField.putClientProperty("JTextField.placeholderText", text.filterPlaceholder());
-        filterField.setToolTipText(text.filterTooltip());
+        filterField.setToolTipText(wordWrap(text.filterTooltip()));
         filterField.getDocument().addDocumentListener(new DocumentListener() {
             @Override
             public void insertUpdate(DocumentEvent event) {
@@ -180,7 +186,7 @@ public class SettingsNavigationPanel extends JPanel {
         button.setName(name);
         button.setFocusable(false);
         button.setIcon(symbolIcon(codePoint, iconSize, button.getForeground()));
-        button.setToolTipText(tooltip);
+        button.setToolTipText(tooltip == null ? null : wordWrap(tooltip));
         button.putClientProperty("JButton.buttonType", "toolBarButton");
         button.putClientProperty("JComponent.sizeVariant", "small");
         int side = UIUtil.scaleForGUI(28);
@@ -233,15 +239,39 @@ public class SettingsNavigationPanel extends JPanel {
         searchIndexInitializer = initializer;
     }
 
-    public void refreshFilter() {
-        buildNavigationTree(filterField.getText());
+    public void setFilterChangeListener(@Nullable Consumer<String> listener) {
+        filterChangeListener = listener == null ? filter -> { } : listener;
     }
 
+    public void refreshFilter() {
+        if (!searchInProgress) {
+            buildNavigationTree(filterField.getText());
+        }
+    }
+
+    void setSearchInProgress(boolean searchInProgress) {
+        this.searchInProgress = searchInProgress;
+        navigationTree.setEnabled(!searchInProgress);
+        if (searchInProgress) {
+            filterStatusLabel.setText("");
+            filterStatusLabel.setVisible(false);
+        }
+        navigationContentLayout.show(navigationContent,
+              searchInProgress ? SEARCHING_CARD : NAVIGATION_TREE_CARD);
+    }
+
+    /** @return the normalized active search filter */
     public String getActiveFilter() {
         return SettingsRoute.normalizeSearchText(filterField.getText());
     }
 
-    public void setFilterText(String filterText) {
+    /** @return the search field's unmodified display text */
+    public String getFilterText() {
+        return filterField.getText();
+    }
+
+    /** Sets the search field's display text; {@code null} clears it and listeners receive its normalized form. */
+    public void setFilterText(@Nullable String filterText) {
         filterField.setText(Objects.requireNonNullElse(filterText, ""));
     }
 
@@ -254,7 +284,10 @@ public class SettingsNavigationPanel extends JPanel {
         if (searchIndexInitializer != null) {
             searchIndexInitializer.run();
         }
-        buildNavigationTree(filterField.getText());
+        if (!searchInProgress) {
+            buildNavigationTree(filterField.getText());
+        }
+        filterChangeListener.accept(getActiveFilter());
     }
 
     private void buildNavigationTree(String filterText) {

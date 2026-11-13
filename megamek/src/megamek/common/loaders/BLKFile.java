@@ -73,6 +73,7 @@ public class BLKFile {
     private static final MMLogger logger = MMLogger.create(BLKFile.class);
 
     public static final String UNIT_FILE_UUID = "UUID";
+    public static final String REFIT_FROM_UUID = "refitFromUUID";
 
     BuildingBlock dataFile;
 
@@ -127,6 +128,9 @@ public class BLKFile {
     }
 
     protected void setBasicEntityData(Entity entity) throws EntityLoadingException {
+        if (dataFile.exists(REFIT_FROM_UUID)) {
+            entity.setRefitFromUUID(dataFile.getDataAsString(REFIT_FROM_UUID)[0]);
+        }
         if (dataFile.exists(UNIT_FILE_UUID)) {
             String unitFileUUID = dataFile.getDataAsString(UNIT_FILE_UUID)[0];
             if (!StringUtility.isNullOrBlank(unitFileUUID)) {
@@ -595,7 +599,7 @@ public class BLKFile {
             for (String line : dataFile.getDataAsString("systemManufacturers")) {
                 String[] fields = line.split(":");
                 System comp = System.parse(fields[0]);
-                if ((null != comp) && (fields.length > 1)) {
+                if ((comp != null) && (fields.length > 1)) {
                     e.getFluff().setSystemManufacturer(comp, fields[1]);
                 }
             }
@@ -605,7 +609,7 @@ public class BLKFile {
             for (String line : dataFile.getDataAsString("systemModels")) {
                 String[] fields = line.split(":");
                 System comp = System.parse(fields[0]);
-                if ((null != comp) && (fields.length > 1)) {
+                if ((comp != null) && (fields.length > 1)) {
                     e.getFluff().setSystemModel(comp, fields[1]);
                 }
             }
@@ -656,7 +660,7 @@ public class BLKFile {
         if (dataFile.exists("originalBuildYear")) {
             e.setOriginalBuildYear(dataFile.getDataAsInt("originalBuildYear")[0]);
         }
-        
+
         if (!dataFile.exists("type")) {
             throw new EntityLoadingException("Could not find type block.");
         }
@@ -741,6 +745,9 @@ public class BLKFile {
         BuildingBlock blk = new BuildingBlock();
         blk.createNewBlock();
         blk.writeBlockData(UNIT_FILE_UUID, t.getUnitFileUUID());
+        if (t.getRefitFromUUID() != null) {
+            blk.writeBlockData(REFIT_FROM_UUID, t.getRefitFromUUID());
+        }
 
         if (t instanceof BattleArmor) {
             blk.writeBlockData("UnitType", "BattleArmor");
@@ -1163,16 +1170,22 @@ public class BLKFile {
                 if (infantry.getSecondaryWeaponsPerSquad() > 0) {
                     blk.writeBlockData("secondn", infantry.getSecondaryWeaponsPerSquad());
                 }
-                if (null != infantry.getPrimaryWeapon()) {
+                if (infantry.getPrimaryWeapon() != null){
                     blk.writeBlockData("Primary", infantry.getPrimaryWeapon().getInternalName());
                 }
-                if (null != infantry.getSecondaryWeapon()) {
+                if (infantry.getSecondaryWeapon() != null){
                     blk.writeBlockData("Secondary", infantry.getSecondaryWeapon().getInternalName());
                 }
-                if (null != infantry.getDisposableWeapon()) {
+                if (infantry.getDisposableWeapon() != null){
                     blk.writeBlockData("disposableWeapon", infantry.getDisposableWeapon().getInternalName());
                 }
-
+                // Standard is the default, so only an Inferno declaration needs writing (TW p. 143)
+                if (infantry.firesInfernoSrms()) {
+                    blk.writeBlockData(BLKInfantryFile.SRM_MUNITION, BLKInfantryFile.SRM_MUNITION_INFERNO);
+                }
+                if (infantry.getCustomArmorName() != null) {
+                    blk.writeBlockData("armor_name", infantry.getCustomArmorName());
+                }
                 if (infantry.getCustomArmorDamageDivisor() != 1) {
                     blk.writeBlockData("armordivisor", Double.toString(infantry.getCustomArmorDamageDivisor()));
                 }
@@ -1242,6 +1255,9 @@ public class BLKFile {
                 blk.writeBlockData("building_type", abstractBuildingEntity.getBuildingType().getTypeValue());
                 blk.writeBlockData("height", abstractBuildingEntity.getInternalBuilding().getBuildingHeight());
                 blk.writeBlockData("cf", abstractBuildingEntity.getInternalBuilding().getCurrentCF(CubeCoords.ZERO));
+                if (abstractBuildingEntity.hasExplicitCrewCount()) {
+                    blk.writeBlockData("crew", abstractBuildingEntity.getNCrew());
+                }
 
                 blk.writeBlockData("coords",
                       abstractBuildingEntity.getInternalBuilding().getCoordsList().toArray(new CubeCoords[0]));
@@ -1670,31 +1686,39 @@ public class BLKFile {
                             break;
                         case "crewquarters":
                             pbi = new ParsedBayInfo(numbers, usedBayNumbers);
-                            e.addTransporter(new CrewQuartersCargoBay(pbi.getSize(), pbi.getDoors()), isPod);
+                            e.addTransporter(new CrewQuartersCargoBay(pbi.getSize(),
+                                  pbi.getDoors(),
+                                  pbi.getBayNumber()), isPod);
                             break;
                         case "steeragequarters":
                             pbi = new ParsedBayInfo(numbers, usedBayNumbers);
-                            e.addTransporter(new SteerageQuartersCargoBay(pbi.getSize(), pbi.getDoors()), isPod);
+                            e.addTransporter(new SteerageQuartersCargoBay(pbi.getSize(),
+                                  pbi.getDoors(),
+                                  pbi.getBayNumber()), isPod);
                             break;
                         case "2ndclassquarters":
                             pbi = new ParsedBayInfo(numbers, usedBayNumbers);
-                            e.addTransporter(new SecondClassQuartersCargoBay(pbi.getSize(), pbi.getDoors()), isPod);
+                            e.addTransporter(new SecondClassQuartersCargoBay(pbi.getSize(),
+                                  pbi.getDoors(),
+                                  pbi.getBayNumber()), isPod);
                             break;
                         case "1stclassquarters":
                             pbi = new ParsedBayInfo(numbers, usedBayNumbers);
-                            e.addTransporter(new FirstClassQuartersCargoBay(pbi.getSize(), pbi.getDoors()), isPod);
+                            e.addTransporter(new FirstClassQuartersCargoBay(pbi.getSize(),
+                                  pbi.getDoors(),
+                                  pbi.getBayNumber()), isPod);
                             break;
                         case "pillionseats":
                             pbi = new ParsedBayInfo(numbers, usedBayNumbers);
-                            e.addTransporter(new PillionSeatCargoBay(pbi.getSize()), isPod);
+                            e.addTransporter(new PillionSeatCargoBay(pbi.getSize(), pbi.getBayNumber()), isPod);
                             break;
                         case "standardseats":
                             pbi = new ParsedBayInfo(numbers, usedBayNumbers);
-                            e.addTransporter(new StandardSeatCargoBay(pbi.getSize()), isPod);
+                            e.addTransporter(new StandardSeatCargoBay(pbi.getSize(), pbi.getBayNumber()), isPod);
                             break;
                         case "ejectionseats":
                             pbi = new ParsedBayInfo(numbers, usedBayNumbers);
-                            e.addTransporter(new EjectionSeatCargoBay(pbi.getSize()), isPod);
+                            e.addTransporter(new EjectionSeatCargoBay(pbi.getSize(), pbi.getBayNumber()), isPod);
                             break;
                         case "dockingcollar":
                             // Add values for collars so they can be parsed and assigned a 'bay' number

@@ -48,7 +48,6 @@ import java.awt.geom.Point2D;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
-import java.lang.System;
 import java.util.*;
 import java.util.List;
 import java.util.Queue;
@@ -58,6 +57,7 @@ import javax.swing.*;
 import javax.swing.plaf.metal.DefaultMetalTheme;
 import javax.swing.plaf.metal.MetalTheme;
 
+import jakarta.annotation.Nullable;
 import megamek.MMConstants;
 import megamek.client.TimerSingleton;
 import megamek.client.bot.princess.MinefieldDeploymentPlanner;
@@ -78,6 +78,7 @@ import megamek.client.ui.tileset.TilesetManager;
 import megamek.client.ui.util.EntityWreckHelper;
 import megamek.client.ui.util.FontHandler;
 import megamek.client.ui.util.ImageCache;
+import megamek.client.ui.util.ImageKeyedCache;
 import megamek.client.ui.util.KeyBindReceiver;
 import megamek.client.ui.util.KeyCommandBind;
 import megamek.client.ui.util.MegaMekController;
@@ -99,7 +100,6 @@ import megamek.common.actions.AttackAction;
 import megamek.common.actions.EntityAction;
 import megamek.common.actions.PhysicalAttackAction;
 import megamek.common.actions.WeaponAttackAction;
-import megamek.common.annotations.Nullable;
 import megamek.common.board.AllowedDeploymentHelper;
 import megamek.common.board.Board;
 import megamek.common.board.BoardHelper;
@@ -155,6 +155,7 @@ public final class BoardView extends AbstractBoardView
     private static final int BOARD_HEX_DOUBLE_CLICK = 2;
     private static final int BOARD_HEX_DRAG = 3;
     private static final int BOARD_HEX_POPUP = 4;
+    private static final long CHATTER_BOX_WHEEL_SCROLL_INTERVAL_NANOS = 100_000_000L;
 
     // the dimensions of MegaMek's hex images
     public static final int HEX_DIAG = (int) Math.round(Math.sqrt(HEX_W * HEX_W + HEX_H * HEX_H));
@@ -230,6 +231,9 @@ public final class BoardView extends AbstractBoardView
     private JScrollBar horizontalBar;
     private int scrollXDifference = 0;
     private int scrollYDifference = 0;
+    private double chatterBoxWheelRotation;
+    private long lastChatterBoxWheelScrollNanos = Long.MIN_VALUE;
+    private double boardZoomWheelRotation;
     private int preZoomOverviewIndex = 0;
     private int preZoomOverviewViewX = 0;
     private int preZoomOverviewViewY = 0;
@@ -322,8 +326,8 @@ public final class BoardView extends AbstractBoardView
 
     // Initial scale factor for sprites and map
     float scale = 1.00f;
-    private ImageCache<Integer, Image> scaledImageCache = new ImageCache<>();
-    private final ImageCache<Integer, BufferedImage> shadowImageCache = new ImageCache<>();
+    private ImageKeyedCache<Image> scaledImageCache = new ImageKeyedCache<>();
+    private final ImageKeyedCache<BufferedImage> shadowImageCache = new ImageKeyedCache<>();
 
     private final Set<Integer> animatedImages = new HashSet<>();
 
@@ -680,45 +684,71 @@ public final class BoardView extends AbstractBoardView
 
                     // mouseWheelEvent need to adjust the point, because it should be against the displayable dimension
                     if (displayable.isMouseOver(dispPoint, drawDimension)) {
-                        if (mouseWheelEvent.getWheelRotation() > 0) {
-                            chatterBox2.scrollDown();
-                        } else {
-                            chatterBox2.scrollUp();
+                        boardZoomWheelRotation = 0;
+                        chatterBoxWheelRotation += mouseWheelEvent.getPreciseWheelRotation();
+                        long now = java.lang.System.nanoTime();
+                        if ((Math.abs(chatterBoxWheelRotation) >= 1.0)
+                              && ((lastChatterBoxWheelScrollNanos == Long.MIN_VALUE)
+                                    || (now - lastChatterBoxWheelScrollNanos
+                                          >= CHATTER_BOX_WHEEL_SCROLL_INTERVAL_NANOS))) {
+                            if (chatterBoxWheelRotation > 0) {
+                                chatterBox2.scrollDown();
+                            } else {
+                                chatterBox2.scrollUp();
+                            }
+
+                            chatterBoxWheelRotation = 0;
+                            lastChatterBoxWheelScrollNanos = now;
+                            refreshDisplayables();
                         }
 
-                        refreshDisplayables();
                         return;
                     }
                 }
             }
 
-            // calculate a few things to reposition the map
-            Coords zoomCenter = getCoordsAt(mouseWheelEvent.getPoint());
-            Point hexL = getCentreHexLocation(zoomCenter);
-            Point inHexDelta = new Point(mouseWheelEvent.getPoint());
-            inHexDelta.translate(-HEX_W, -HEX_H);
-            inHexDelta.translate(-hexL.x, -hexL.y);
-            double inHexDeltaX = ((double) inHexDelta.x) / ((double) HEX_W) / scale;
-            double inHexDeltaY = ((double) inHexDelta.y) / ((double) HEX_H) / scale;
-            int oldZoomIndex = zoomIndex;
-
             boolean ZoomNoCtrl = GUIP.getMouseWheelZoom();
             boolean wheelFlip = GUIP.getMouseWheelZoomFlip();
-            boolean zoomIn = (mouseWheelEvent.getWheelRotation() > 0) ^ wheelFlip; // = XOR
             boolean doZoom = ZoomNoCtrl ^ mouseWheelEvent.isControlDown(); // = XOR
             boolean horizontalScroll = !doZoom && mouseWheelEvent.isShiftDown();
 
             if (doZoom) {
-                if (zoomIn) {
-                    zoomIn();
-                } else {
-                    zoomOut();
+                boardZoomWheelRotation += mouseWheelEvent.getPreciseWheelRotation();
+                int zoomSteps = (int) Math.abs(boardZoomWheelRotation);
+                if (zoomSteps == 0) {
+                    return;
+                }
+
+                boolean zoomIn = (boardZoomWheelRotation > 0) ^ wheelFlip; // = XOR
+                boardZoomWheelRotation -= Math.copySign(zoomSteps, boardZoomWheelRotation);
+
+                Coords zoomCenter = getCoordsAt(mouseWheelEvent.getPoint());
+                Point hexL = getCentreHexLocation(zoomCenter);
+                Point inHexDelta = new Point(mouseWheelEvent.getPoint());
+                inHexDelta.translate(-HEX_W, -HEX_H);
+                inHexDelta.translate(-hexL.x, -hexL.y);
+                double inHexDeltaX = ((double) inHexDelta.x) / ((double) HEX_W) / scale;
+                double inHexDeltaY = ((double) inHexDelta.y) / ((double) HEX_H) / scale;
+                int oldZoomIndex = zoomIndex;
+
+                for (int step = 0; step < zoomSteps; step++) {
+                    if (zoomIn) {
+                        zoomIn();
+                    } else {
+                        zoomOut();
+                    }
                 }
 
                 if (zoomIndex != oldZoomIndex) {
                     adjustVisiblePosition(zoomCenter, dispPoint, inHexDeltaX, inHexDeltaY);
                 }
+                pingMinimap();
             } else {
+                boardZoomWheelRotation = 0;
+                if (mouseWheelEvent.getWheelRotation() == 0) {
+                    return;
+                }
+
                 // SCROLL
                 if (horizontalScroll) {
                     horizontalBar.setValue((int) (horizontalBar.getValue() + (HEX_H
@@ -730,9 +760,8 @@ public final class BoardView extends AbstractBoardView
                           * (mouseWheelEvent.getWheelRotation()))));
                 }
                 stopSoftCentering();
+                pingMinimap();
             }
-
-            pingMinimap();
         });
 
         MouseMotionListener mouseMotionListener = new MouseMotionAdapter() {
@@ -1063,7 +1092,25 @@ public final class BoardView extends AbstractBoardView
         }
     }
 
+    /**
+     * Returns whether a unit that finished a move can have that move animated. A unit that mounted a DropShip, was
+     * recovered by a carrier or left the board during its move has no position left, so there is no hex to draw its
+     * ghost sprite in.
+     *
+     * @param entity the unit that finished a move
+     *
+     * @return {@code true} when the unit still has a position to animate from
+     */
+    static boolean canAnimateMove(@Nullable Entity entity) {
+        return (entity != null) && (entity.getPosition() != null);
+    }
+
     void addMovingUnit(Entity entity, Vector<UnitLocation> movePath) {
+        if (!canAnimateMove(entity)) {
+            LOGGER.debug("Move animation skipped: {} has no position (loaded or off board)",
+                  (entity == null) ? "null entity" : entity.getShortName());
+            return;
+        }
         if (!movePath.isEmpty() && isOnThisBord(entity)) {
             MovingUnit m = new MovingUnit(entity, movePath);
             movingUnits.add(m);
@@ -1086,7 +1133,7 @@ public final class BoardView extends AbstractBoardView
             return;
         }
         if (GUIP.getShowFPS()) {
-            paintCompsStartTime = System.nanoTime();
+            paintCompsStartTime = java.lang.System.nanoTime();
         }
 
         UIUtil.setHighQualityRendering(graphics2D);
@@ -1119,7 +1166,7 @@ public final class BoardView extends AbstractBoardView
                 int yRem = 0;
 
                 if (y == 0) {
-                    yRem = clipping.y % h;
+                    yRem = tileOffset(clipping.y, h);
                 }
 
                 x = 0;
@@ -1127,7 +1174,7 @@ public final class BoardView extends AbstractBoardView
                 while (x < (int) Math.floor(clipping.getWidth())) {
                     int xRem = 0;
                     if (x == 0) {
-                        xRem = clipping.x % w;
+                        xRem = tileOffset(clipping.x, w);
                     }
                     if ((xRem > 0) || (yRem > 0)) {
                         try {
@@ -1293,7 +1340,7 @@ public final class BoardView extends AbstractBoardView
                 totalTime = 0;
                 frameCount = 0;
             } else {
-                totalTime += System.nanoTime() - paintCompsStartTime;
+                totalTime += java.lang.System.nanoTime() - paintCompsStartTime;
                 frameCount++;
             }
 
@@ -1365,23 +1412,23 @@ public final class BoardView extends AbstractBoardView
             }
         }
     }
-    
-    /** 
+
+    /**
      * Debugging method used to render minefield effectiveness ratings
      */
     @SuppressWarnings("unused")
     private void renderMinefieldScores(Graphics2D graphics2D) {
     	/*Map<Coords, Integer> minefieldScores = mdp.getMinefieldScores(Minefield.TYPE_CONVENTIONAL, UnitType.TANK,
     			EntityMovementMode.WHEELED, getBoard());*/
-    	
+
     	MinefieldDeploymentPlanner mdp = new MinefieldDeploymentPlanner(getLocalPlayer(), game);
     	Map<Coords, Double> minefieldScores = mdp.buildCoalescedMinefieldScores(Minefield.TYPE_CONVENTIONAL, getBoard());
-    	
+
     	for (Coords coords : minefieldScores.keySet()) {
     		Point centreHexLocation = getCentreHexLocation(coords.getX(), coords.getY(), true);
             centreHexLocation.translate(HEX_W / 2, HEX_H);
             graphics2D.setColor(Color.pink);
-            drawCenteredString(String.format("%3.1f", minefieldScores.get(coords)), 
+            drawCenteredString(String.format("%3.1f", minefieldScores.get(coords)),
             		centreHexLocation.x, centreHexLocation.y, FONT_14, graphics2D);
     	}
     }
@@ -1602,6 +1649,20 @@ public final class BoardView extends AbstractBoardView
                 }
             }
         }
+    }
+
+    /**
+     * Returns how far into a background tile the first tile of a clip area starts. The clip origin can be negative
+     * when the board is scrolled against an edge, so this uses {@link Math#floorMod(int, int)}: a plain {@code %} would
+     * return a negative offset and an invalid subimage request.
+     *
+     * @param clipStart the x or y origin of the clip area, which may be negative
+     * @param tileSize  the tile width or height
+     *
+     * @return the offset into the tile, from {@code 0} to {@code tileSize - 1}
+     */
+    static int tileOffset(int clipStart, int tileSize) {
+        return Math.floorMod(clipStart, tileSize);
     }
 
     /**
@@ -2726,7 +2787,7 @@ public final class BoardView extends AbstractBoardView
         if (!supersUnderShadow) {
             if (supers != null) {
                 for (Image image : supers) {
-                    if (null != image) {
+                    if (image != null) {
                         if (animatedImages.contains(image.hashCode())) {
                             dontCache = true;
                         }
@@ -3797,6 +3858,19 @@ public final class BoardView extends AbstractBoardView
             addC3Link(entity);
         }
 
+        // The removal above also dropped the lines that this entity's hierarchic subordinates draw TO it (each
+        // slave owns its own line to its master), and addC3Link(entity) only redraws the entity's own line to its
+        // master. Re-add the subordinates' lines, otherwise selecting a master in the firing phase erases its
+        // network on the board until the next full redraw.
+        for (Entity subordinate : game.getEntitiesVector()) {
+            if ((subordinate.getC3MasterId() == entity.getId())
+                  && !subordinate.equals(entity)
+                  && subordinate.hasC3()
+                  && isOnThisBord(subordinate)) {
+                addC3Link(subordinate);
+            }
+        }
+
         vtolAttackSprites.removeIf(s -> s.getEntity().getId() == entity.getId());
 
         // Remove Flyover Sprites
@@ -4151,7 +4225,7 @@ public final class BoardView extends AbstractBoardView
         for (ListIterator<MoveStep> i = movePath.getSteps();
               i.hasNext(); ) {
             final MoveStep step = i.next();
-            if ((null != previousStep) && ((step.getType() == MoveStepType.UP)
+            if ((previousStep != null) && ((step.getType() == MoveStepType.UP)
                   || (step.getType() == MoveStepType.DOWN)
                   || (step.getType() == MoveStepType.ACC)
                   || (step.getType() == MoveStepType.DEC)
@@ -4507,8 +4581,8 @@ public final class BoardView extends AbstractBoardView
             }
         }
 
-        for (Enumeration<AttackAction> i = game.getCharges();
-              i.hasMoreElements(); ) {
+        for (Enumeration<AttackAction> i = game.getDisplacementAttacks();
+             i.hasMoreElements(); ) {
             AttackAction attackAction = i.nextElement();
             if (attackAction instanceof PhysicalAttackAction physicalAttackAction) {
                 addAttack(physicalAttackAction);
@@ -5148,11 +5222,11 @@ public final class BoardView extends AbstractBoardView
      */
     private class RedrawWorker implements Runnable {
 
-        private long lastTime = System.currentTimeMillis();
+        private long lastTime = java.lang.System.currentTimeMillis();
 
         @Override
         public void run() {
-            long currentTime = System.currentTimeMillis();
+            long currentTime = java.lang.System.currentTimeMillis();
 
             if (boardPanel.isShowing()) {
                 boolean redraw = false;
@@ -5578,6 +5652,15 @@ public final class BoardView extends AbstractBoardView
         zoom();
     }
 
+    /**
+     * Reset the zoom level to the BASE_ZOOM_INDEX
+     */
+    @Override
+    public void zoomReset() {
+        zoomIndex = BASE_ZOOM_INDEX;
+        zoom();
+    }
+
     @Override
     public void zoomOverviewToggle() {
         if (!zoomOverview) {
@@ -5660,7 +5743,7 @@ public final class BoardView extends AbstractBoardView
 
         hex_size = new Dimension((int) (HEX_W * scale), (int) (HEX_H * scale));
 
-        scaledImageCache = new ImageCache<>();
+        scaledImageCache = new ImageKeyedCache<>();
 
         cursorSprite.prepare();
         highlightSprite.prepare();
@@ -5743,7 +5826,7 @@ public final class BoardView extends AbstractBoardView
         Image scaled;
         if (useCache) {
             // Check the cache
-            scaled = scaledImageCache.get(base.hashCode());
+            scaled = scaledImageCache.get(base);
         } else {
             scaled = null;
         }
@@ -5781,7 +5864,7 @@ public final class BoardView extends AbstractBoardView
             tracker.removeImage(scaled);
             // Cache the image if the flag is set
             if (useCache) {
-                scaledImageCache.put(base.hashCode(), scaled);
+                scaledImageCache.put(base, scaled);
             }
         }
         return scaled;
@@ -5818,8 +5901,7 @@ public final class BoardView extends AbstractBoardView
     }
 
     public BufferedImage createShadowMask(Image image) {
-        int hashCode = image.hashCode();
-        BufferedImage mask = shadowImageCache.get(hashCode);
+        BufferedImage mask = shadowImageCache.get(image);
         if (mask != null) {
             return mask;
         }
@@ -5831,7 +5913,7 @@ public final class BoardView extends AbstractBoardView
         graphics2D.setColor(Color.BLACK);
         graphics2D.fillRect(0, 0, image.getWidth(null), image.getHeight(null));
         graphics2D.dispose();
-        shadowImageCache.put(hashCode, mask);
+        shadowImageCache.put(image, mask);
         return mask;
     }
 

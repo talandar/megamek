@@ -44,6 +44,7 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -57,7 +58,10 @@ import javax.swing.KeyStroke;
 
 import megamek.client.ui.Messages;
 import megamek.client.ui.clientGUI.ClientGUI;
+import megamek.client.ui.dialogs.BotCommands.BotFormationsMenuBuilder;
+import megamek.client.ui.dialogs.BotCommands.BotOrderFacingDialog;
 import megamek.client.ui.dialogs.iconChooser.CamoChooserDialog;
+import megamek.client.ui.enums.DialogResult;
 import megamek.client.ui.tileset.EntityImage;
 import megamek.client.ui.tileset.MMStaticDirectoryManager;
 import megamek.client.ui.util.MenuScroller;
@@ -78,7 +82,11 @@ import megamek.common.game.Game;
 import megamek.common.icons.Camouflage;
 import megamek.common.interfaces.ForceAssignable;
 import megamek.common.options.OptionsConstants;
+import megamek.common.orders.OrderEligibility;
+import megamek.common.orders.UnitOrderAction;
+import megamek.common.orders.UnitOrders;
 import megamek.common.preference.PreferenceManager;
+import megamek.common.rules.SettableHeat;
 import megamek.common.units.Dropship;
 import megamek.common.units.Entity;
 import megamek.common.units.EntityWeightClass;
@@ -87,6 +95,7 @@ import megamek.common.units.Jumpship;
 import megamek.common.units.ProtoMek;
 import megamek.common.util.C3Util;
 import megamek.logging.MMLogger;
+import megamek.server.commands.UnitOrderCommand;
 
 /**
  * Creates the Lobby Mek right-click pop-up menu for both the sortable table and the force tree.
@@ -106,6 +115,9 @@ class LobbyMekPopup {
     static final String LMP_NO_HIDE = "NOHIDE";
     static final String LMP_HIDE = "HIDE";
     static final String LMP_HIDDEN = "HIDDEN";
+    static final String LMP_SCAN_TARGET = "SCAN_TARGET";
+    static final String LMP_SCAN_WANTED = "SCAN_WANTED";
+    static final String LMP_SCAN_NOT_WANTED = "SCAN_NOT_WANTED";
     static final String LMP_F_ASSIGN_ONLY = "FASSIGNONLY";
     static final String LMP_F_ASSIGN = "FASSIGN";
     static final String LMP_RAPID_FIRE_MG_OFF = "RAPIDFIREMG_OFF";
@@ -122,6 +134,7 @@ class LobbyMekPopup {
     static final String LMP_C3JOIN = "C3JOIN";
     static final String LMP_C3_FORM_NHC3 = "C3FORMNHC3";
     static final String LMP_C3_FORM_C3 = "C3FORMC3";
+    static final String LMP_C3_MANAGER = "C3MANAGER";
     static final String LMP_C3LM = "C3LM";
     static final String LMP_C3CM = "C3CM";
     static final String LMP_SQUADRON = "SQUADRON";
@@ -141,6 +154,7 @@ class LobbyMekPopup {
     static final String LMP_UNLOAD = "UNLOAD";
     static final String LMP_DETACH_FROM_TRACTOR = "DETACHFROMTRACTOR";
     static final String LMP_DETACH_TRAILER = "DETACHTRAILER";
+    static final String LMP_CONNECT_TRAIN = "CONNECTTRAIN";
     static final String LMP_MOVE_DOWN = "MOVE_DOWN";
     static final String LMP_INDI_CAMO = "INDI_CAMO";
     static final String LMP_DAMAGE = "DAMAGE";
@@ -160,6 +174,11 @@ class LobbyMekPopup {
     private static final String NO_INFO = "|-1";
 
     static final String LMP_UNLOAD_ALL_FROM_BAY = "UNLOADALLFROMBAY";
+
+    /** Heat values listed directly in the heat menu; higher values sit in its "More heat" submenu. */
+    private static final int HEAT_WITHOUT_SUBMENU = 10;
+    /** How many heat values each group of the "More heat" submenu holds. */
+    private static final int HEAT_GROUP_SIZE = 10;
 
     static ScalingPopup getPopup(List<Entity> entities, List<Force> forces, ActionListener listener,
           ChatLounge lobby) {
@@ -278,6 +297,18 @@ class LobbyMekPopup {
             popup.add(towMenu(clientGui, true, listener, entities.getFirst()));
         }
 
+        // Connecting several units at once. Offered whenever the selection could plausibly form a train; the exact
+        // ordering is chosen in the dialog and the server has the final say on legality.
+        boolean anyFreeTrailerSelected = joinedEntities.stream()
+              .anyMatch(entity -> entity.isTrailer() && (entity.getTractor() == Entity.NONE));
+        boolean anyFreeTractorSelected = joinedEntities.stream()
+              .anyMatch(entity -> entity.isTractor() && (entity.getTractor() == Entity.NONE)
+                    && (entity.getTowing() == Entity.NONE));
+        if ((joinedEntities.size() > 1) && anyFreeTrailerSelected && anyFreeTractorSelected) {
+            popup.add(menuItem(Messages.getString("ChatLounge.ConnectAsTrain"),
+                  LMP_CONNECT_TRAIN + NO_INFO + seIds, true, listener));
+        }
+
         if (accessibleCarriers) {
             popup.add(
                   menuItem("Disembark / leave from carriers", LMP_UNLOAD + NO_INFO + seIds, !noneEmbarked, listener));
@@ -306,6 +337,10 @@ class LobbyMekPopup {
 
         popup.add(c3Menu(hasJoinedEntities, joinedEntities, clientGui, listener));
         popup.add(forceMenu(lobby, entities, forces, listener));
+        if (lobby.isForceView() && (forces.size() == 1)) {
+            addBotFormationMenu(popup, lobby, forces.getFirst());
+        }
+        addBotFacingItem(popup, clientGui, joinedEntities);
 
         popup.add(ScalingPopup.spacer());
         popup.add(menuItem("View AlphaStrike Stats", LMP_ALPHA_STRIKE + NO_INFO + seIds, true, listener));
@@ -317,10 +352,116 @@ class LobbyMekPopup {
         popup.add(menuItem("Convert to SBF Formation", LMP_SBF_FORMATION + "|" + foToken(forces) + eIds,
               lobby.isForceView(), listener));
         popup.add(ScalingPopup.spacer());
+        // Enabled whenever anything is selected, forces included: the handler deletes selected forces with their
+        // units after asking, exactly as the Delete key does, so the menu must not stay greyed out in the force
+        // view while the key works.
         popup.add(menuItem("Delete", LMP_DELETE + "|" + foToken(forces) + seIds,
-              !entities.isEmpty() && forces.isEmpty(), listener, KeyEvent.VK_D));
+              !entities.isEmpty() || !forces.isEmpty(), listener, KeyEvent.VK_D));
 
         return popup;
+    }
+
+    /**
+     * Adds the Formation and Role menus for a lance with a CASPAR bot's units in it, so they start the game in formation
+     * and knowing their job. Only the bot's units are ordered; a player's own units in the lance are left alone.
+     * Princess bots take no unit orders, so their lances get no menus.
+     *
+     * <p>A parent force, a company with no units of its own but lances under it that take orders, gets a Formation
+     * menu that sets every such lance, each on its own leader, and a Role item saying to set the role on each lance:
+     * the tester right-clicked the company and concluded the menus did not exist (QA playtest, #9526).</p>
+     */
+    private static void addBotFormationMenu(ScalingPopup popup, ChatLounge lobby, Force force) {
+        List<Integer> unitIds = orderTakingUnits(lobby.game(), force);
+        if (unitIds.isEmpty()) {
+            addParentFormationMenu(popup, lobby, force);
+            return;
+        }
+        Player owner = lobby.game().getEntity(unitIds.getFirst()).getOwner();
+        logger.info("[BotOrders] lobby menus for {}: Formation and Role for {} unit(s) of {} ({} in the lance)",
+              force.getName(), unitIds.size(), owner.getName(), force.getEntities().size());
+        popup.add(BotFormationsMenuBuilder.lobbyFormationMenu(lobby.getClientGUI().getClient(), lobby.game(), force,
+              unitIds));
+        popup.add(BotFormationsMenuBuilder.lobbyRoleMenu(lobby.getClientGUI().getClient(),
+              lobby.getClientGUI().getFrame(), lobby.game(), owner, force, unitIds));
+    }
+
+    private static void addParentFormationMenu(ScalingPopup popup, ChatLounge lobby, Force parent) {
+        List<List<Integer>> lances = new ArrayList<>();
+        for (Force subForce : lobby.game().getForces().getFullSubForces(parent)) {
+            List<Integer> lanceUnitIds = orderTakingUnits(lobby.game(), subForce);
+            if (!lanceUnitIds.isEmpty()) {
+                lances.add(lanceUnitIds);
+            }
+        }
+        if (lances.isEmpty()) {
+            logger.info("[BotOrders] lobby menus for {}: no Formation or Role, none of its units is a CASPAR bot's",
+                  parent.getName());
+            return;
+        }
+        logger.info("[BotOrders] lobby menus for {}: Formation for {} lance(s) under it", parent.getName(),
+              lances.size());
+        popup.add(BotFormationsMenuBuilder.lobbyParentFormationMenu(lobby.getClientGUI().getClient(), lobby.game(),
+              parent, lances));
+        popup.add(BotFormationsMenuBuilder.lobbyParentRoleItem());
+    }
+
+    /**
+     * @return the units placed directly in the force that take unit orders, all of the first such unit's owner, in
+     *       the force's order; empty when none does
+     */
+    private static List<Integer> orderTakingUnits(Game game, Force force) {
+        // decided by who owns the units, not the force: a lance a player builds and then hands to a bot still belongs
+        // to the player, and a lance may mix the player's units with the bot's (HammerGS, 2026-10-02)
+        Player owner = null;
+        List<Integer> unitIds = new ArrayList<>();
+        for (int unitId : force.getEntities()) {
+            Entity unit = game.getEntity(unitId);
+            if ((unit == null) || !OrderEligibility.takesUnitOrders(game, unit.getOwner())) {
+                continue;
+            }
+            if (owner == null) {
+                owner = unit.getOwner();
+            }
+            if (unit.getOwner().getId() == owner.getId()) {
+                unitIds.add(unitId);
+            }
+        }
+        return unitIds;
+    }
+
+    /**
+     * Adds a Bot facing item for units owned by a CASPAR bot. It opens the turret-style facing dialog: the "when stopped"
+     * facing is the one each unit deploys in and holds whenever it stops, the "while moving" one it keeps on the move.
+     * Auto leaves the choice to the bot, which deploys facing the enemy's deployment zone.
+     */
+    private static void addBotFacingItem(ScalingPopup popup, ClientGUI clientGui, Collection<Entity> selectedUnits) {
+        if (selectedUnits.isEmpty()) {
+            return;
+        }
+        List<Entity> units = new ArrayList<>(selectedUnits);
+        units.sort(Comparator.comparingInt(Entity::getId));
+        for (Entity unit : units) {
+            if (!OrderEligibility.takesUnitOrders(clientGui.getClient().getGame(), unit.getOwner())) {
+                return;
+            }
+        }
+        JMenuItem item = new JMenuItem(Messages.getString("BotCommandPanel.Orders.lobbyFacing"));
+        item.addActionListener(event -> {
+            UnitOrders firstOrders = units.getFirst().getUnitOrders();
+            BotOrderFacingDialog dialog = new BotOrderFacingDialog(clientGui.getFrame(), clientGui, units.getFirst(),
+                  firstOrders.getFacingWhileMoving(), firstOrders.getFacingWhenStopped());
+            if (dialog.showDialog() != DialogResult.CONFIRMED) {
+                return;
+            }
+            for (Entity unit : units) {
+                clientGui.getClient().sendChat(UnitOrderCommand.commandText(unit.getId(), UnitOrderAction.FACING,
+                      UnitOrderCommand.FACING_WHILE_MOVING + '=' + dialog.getFacingWhileMoving(),
+                      UnitOrderCommand.FACING_WHEN_STOPPED + '=' + dialog.getFacingWhenStopped()));
+            }
+            logger.info("[BotOrders] lobby facing: moving {}, stopped {} for {} unit(s)",
+                  dialog.getFacingWhileMoving(), dialog.getFacingWhenStopped(), units.size());
+        });
+        popup.add(item);
     }
 
     /**
@@ -386,7 +527,7 @@ class LobbyMekPopup {
     }
 
     static String idString(Game game, int id) {
-        if (PreferenceManager.getClientPreferences().getShowUnitId()) {
+        if (PreferenceManager.getClientPreferences().getLobbyShowUnitId()) {
             return " <FONT" + UIUtil.colorString(UIUtil.uiGray()) + ">[" + id + "]</FONT>";
         } else {
             return "";
@@ -578,10 +719,65 @@ class LobbyMekPopup {
     }
 
     /**
+     * Returns the "Heat at start" submenu. It reaches the top of the heat scale in play plus the dissipation of the
+     * selected unit that sinks the most, since the first Heat Phase takes the dissipation off before it checks heat
+     * effects (see {@link SettableHeat}). Heat past 10 is grouped by tens so the long range stays easy to scan.
+     *
+     * @param game     the game in the lobby
+     * @param listener the popup's listener
+     * @param entities the selected units, which all get the chosen heat
+     * @param eIds     the selected units' command token
+     *
+     * @return the submenu
+     */
+    private static JMenu heatMenu(Game game, ActionListener listener, Collection<Entity> entities, String eIds) {
+        int maximumHeat = SettableHeat.maximum(game, entities);
+        JMenu heatMenu = new JMenu(Messages.getString("ChatLounge.heat.menu"));
+        heatMenu.add(menuItem(Messages.getString("ChatLounge.heat.none"), LMP_HEAT + "|0" + eIds, true, listener));
+        for (int heat = 1; heat <= HEAT_WITHOUT_SUBMENU; heat++) {
+            heatMenu.add(heatItem(heat, eIds, listener));
+        }
+        JMenu moreHeatMenu = new JMenu(Messages.getString("ChatLounge.heat.more"));
+        for (int groupStart = HEAT_WITHOUT_SUBMENU + 1; groupStart <= maximumHeat; groupStart += HEAT_GROUP_SIZE) {
+            int groupEnd = Math.min(groupStart + HEAT_GROUP_SIZE - 1, maximumHeat);
+            JMenu groupMenu = new JMenu(Messages.getString("ChatLounge.heat.range", groupStart, groupEnd));
+            for (int heat = groupStart; heat <= groupEnd; heat++) {
+                groupMenu.add(heatItem(heat, eIds, listener));
+            }
+            moreHeatMenu.add(groupMenu);
+        }
+        heatMenu.add(moreHeatMenu);
+        return heatMenu;
+    }
+
+    private static JMenuItem heatItem(int heat, String eIds, ActionListener listener) {
+        return menuItem(Messages.getString("ChatLounge.heat.value", heat), LMP_HEAT + "|" + heat + eIds, true,
+              listener);
+    }
+
+    /**
      * Returns true when the loader can load all the given entities (under lobby conditions).
      */
     private static boolean canLoadAll(Entity loader, Collection<Entity> entities) {
         return entities.stream().allMatch(e -> loader.canLoad(e, false));
+    }
+
+    /**
+     * The mission's scan targets are a game master's to set, and only matter in a game that uses objectives, so the
+     * submenu is offered to nobody else.
+     */
+    private static boolean isScanTargetMenuUseful(ClientGUI clientGui) {
+        Player personAtTheKeyboard = clientGui.getClient().getLocalPlayer();
+        if ((personAtTheKeyboard == null) || !personAtTheKeyboard.isGameMaster()) {
+            logger.debug("[Scan] Scan target items hidden: {} is not a game master",
+                  (personAtTheKeyboard == null) ? "no local player" : personAtTheKeyboard.getName());
+            return false;
+        }
+        if (!clientGui.getClient().getGame().getOptions().booleanOption(OptionsConstants.VICTORY_USE_OBJECTIVES)) {
+            logger.debug("[Scan] Scan target items hidden: the game does not use objectives");
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -601,6 +797,24 @@ class LobbyMekPopup {
                 menu.add(ScalingPopup.spacer());
             }
 
+            // The mission's scan targets are a game master's to set, and only matter in a game with objectives
+            if (isScanTargetMenuUseful(clientGui)) {
+                boolean anyWanted = false;
+                boolean anyNotWanted = false;
+                for (Entity entity : entities) {
+                    if (entity.isDesignatedScanTarget()) {
+                        anyWanted = true;
+                    } else {
+                        anyNotWanted = true;
+                    }
+                }
+                menu.add(menuItem(Messages.getString("ChatLounge.ScanTarget.wanted"),
+                      LMP_SCAN_TARGET + "|" + LMP_SCAN_WANTED + eIds, anyNotWanted, listener));
+                menu.add(menuItem(Messages.getString("ChatLounge.ScanTarget.notWanted"),
+                      LMP_SCAN_TARGET + "|" + LMP_SCAN_NOT_WANTED + eIds, anyWanted, listener));
+                menu.add(ScalingPopup.spacer());
+            }
+
             menu.add(menuItem("Standing", LMP_STAND + "|" + LMP_STAND + eIds, true, listener));
             menu.add(menuItem("Prone", LMP_STAND + "|" + LMP_PRONE + eIds, true, listener));
             if (clientGui.getClient().getGame().getOptions()
@@ -609,22 +823,17 @@ class LobbyMekPopup {
             }
             menu.add(ScalingPopup.spacer());
 
-            // Heat
-            JMenu heatMenu = new JMenu("Heat at start");
-            heatMenu.add(menuItem("No heat", LMP_HEAT + "|0" + eIds, true, listener));
-            for (int i = 1; i < 11; i++) {
-                heatMenu.add(menuItem("Heat " + i, LMP_HEAT + "|" + i + eIds, true, listener));
-            }
-            JMenu subHeatMenu = new JMenu("More heat");
-            for (int i = 11; i < 41; i++) {
-                subHeatMenu.add(menuItem("Heat " + i, LMP_HEAT + "|" + i + eIds, true, listener));
-            }
-            heatMenu.add(subHeatMenu);
-            menu.add(heatMenu);
+            menu.add(heatMenu(clientGui.getClient().getGame(), listener, entities, eIds));
             menu.add(ScalingPopup.spacer());
 
             // Late deployment
             JMenu lateMenu = new JMenu("Deployment round");
+            if (Game.rulesManager.getRulesGame().isWalkOnDeployment()) {
+                lateMenu.add(menuItem(Messages.getString("ChatLounge.deploysPreGame"),
+                      LMP_DEPLOY + "|" + Entity.DEPLOY_ROUND_PRE_GAME + eIds,
+                      true,
+                      listener));
+            }
             lateMenu.add(menuItem("At game start", LMP_DEPLOY + "|0" + eIds, true, listener));
             for (int i = 1; i < 11; i++) {
                 lateMenu.add(menuItem("Before round " + i, LMP_DEPLOY + "|" + i + eIds, true, listener));
@@ -681,6 +890,11 @@ class LobbyMekPopup {
         JMenu menu = new JMenu("C3");
 
         if (entities.stream().anyMatch(Entity::hasAnyC3System)) {
+
+            // The primary entry: the manager shows the selected units and every network as a tree
+            menu.add(menuItem("Open C3 Network Manager...", LMP_C3_MANAGER + NO_INFO + enToken(entities),
+                  enabled, listener));
+            menu.addSeparator();
 
             menu.add(menuItem("Disconnect", LMP_C3DISCONNECT + NO_INFO + enToken(entities), enabled, listener));
 
@@ -746,7 +960,9 @@ class LobbyMekPopup {
                         continue;
                     }
                     int nodes = other.calculateFreeC3Nodes();
-                    if (other.hasC3MM() && entity.hasC3M() && other.C3MasterIs(other)) {
+                    if (entity.hasC3M() && other.C3MasterIs(other)) {
+                        // A master joining a company commander occupies a company-level master link, so show
+                        // that pool - also for single-computer company masters (CR p.198, Configuration 1)
                         nodes = other.calculateFreeC3MNodes();
                     }
                     if (entity.C3MasterIs(other)) {
@@ -774,8 +990,11 @@ class LobbyMekPopup {
                         menu.add(menuItem(item, LMP_C3CONNECT + "|" + other.getId() + enToken(entities), nodes != 0,
                               listener));
 
-                    } else if (other.isC3CompanyCommander() == entity.hasC3M()
-                          && !entity.isC3CompanyCommander()) {
+                    } else if (!entity.isC3CompanyCommander()
+                          && (entity.hasC3M() ? lanceRolesCompatible(game, entity, other)
+                          : other.isC3IndependentMaster())) {
+                        // Slaves connect to lance masters; masters connect to company commanders or - forming an
+                        // All-C3-Master lance (CR p.199) - to lance masters whose dependents are all masters too.
                         String item = "<HTML>Connect to " + other.getShortNameRaw() + idString(game, other.getId());
                         item += " (" + other.getC3NetId() + ")";
                         if (entity.C3MasterIs(other)) {
@@ -793,6 +1012,22 @@ class LobbyMekPopup {
         }
         menu.setEnabled(enabled && menu.getItemCount() > 0);
         return menu;
+    }
+
+    /**
+     * Returns true when the joining unit's role fits the dependents already connected to the given master. A lance is
+     * homogeneous (CR p.199): all C3 Slaves, or - under the All-C3-Master rule - all C3 Masters in slave roles, so a
+     * master may not join a lance of slaves and vice versa.
+     */
+    private static boolean lanceRolesCompatible(Game game, Entity joiningUnit, Entity master) {
+        boolean joinerIsMaster = joiningUnit.hasC3M();
+        for (Entity other : game.getEntitiesVector()) {
+            if (!other.equals(master) && !other.equals(joiningUnit) && other.C3MasterIs(master)
+                  && (other.hasC3M() != joinerIsMaster)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

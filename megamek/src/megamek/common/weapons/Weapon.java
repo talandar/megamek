@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2004, 2005 Ben Mazur (bmazur@sev.org)
- * Copyright (C) 2007-2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2007-2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -39,9 +39,9 @@ import static megamek.common.game.IGame.LOGGER;
 import java.io.Serial;
 import java.io.Serializable;
 
+import jakarta.annotation.Nullable;
 import megamek.common.ToHitData;
 import megamek.common.actions.WeaponAttackAction;
-import megamek.common.annotations.Nullable;
 import megamek.common.equipment.AmmoType;
 import megamek.common.equipment.WeaponType;
 import megamek.common.game.Game;
@@ -152,7 +152,7 @@ public abstract class Weapon extends WeaponType implements Serializable {
         // Flamers are spread out over all sorts of weapon types not limited to FlamerWeapon.
         // So modes are handled here.
         if (hasFlag(WeaponType.F_FLAMER)) {
-            if (!gameOptions.booleanOption(OptionsConstants.BASE_FLAMER_HEAT)) {
+            if (!Game.rulesManager.getRulesWeapons().flamerHeatAndDamage(gameOptions.booleanOption(OptionsConstants.BASE_FLAMER_HEAT))) {
                 addMode(MODE_FLAMER_DAMAGE);
                 addMode(MODE_FLAMER_HEAT);
             } else {

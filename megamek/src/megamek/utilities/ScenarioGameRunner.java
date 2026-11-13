@@ -38,6 +38,7 @@ import java.io.File;
 import java.io.ObjectInputFilter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -48,7 +49,9 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
+import jakarta.annotation.Nullable;
 import megamek.MMConstants;
+import megamek.client.AbstractClient;
 import megamek.client.HeadlessClient;
 import megamek.client.bot.AIType;
 import megamek.client.bot.BotClient;
@@ -61,12 +64,14 @@ import megamek.common.event.GameListenerAdapter;
 import megamek.common.event.GamePhaseChangeEvent;
 import megamek.common.game.Game;
 import megamek.common.game.IGame;
+import megamek.common.interfaces.IEntityRemovalConditions;
 import megamek.common.jacksonAdapters.BotParser;
 import megamek.common.loaders.MekSummaryCache;
 import megamek.common.net.marshalling.SanityInputFilter;
 import megamek.common.preference.PreferenceManager;
 import megamek.common.scenario.Scenario;
 import megamek.common.scenario.ScenarioLoader;
+import megamek.common.units.EjectedCrew;
 import megamek.common.units.Entity;
 import megamek.logging.MMLogger;
 import megamek.server.Server;
@@ -102,6 +107,28 @@ public class ScenarioGameRunner {
     private final Scenario scenario;
     private final Game game;
 
+    /**
+     * Every client this runner has connected, so they can be disconnected when the game ends.
+     *
+     * <p>This matters far more than it looks when many games run in one JVM. Each client holds its own copy of the
+     * {@link Game} - every entity, the board, and for a bot its path caches and precognition thread. Leaving them
+     * connected leaks all of that per game, and a batch runner plays hundreds. The symptom is not a crash: the heap
+     * fills, the JVM spends its time collecting garbage instead of playing, and a later game slows to a stop while
+     * still technically running.</p>
+     */
+    private final List<AbstractClient> connectedClients = new ArrayList<>();
+
+    /**
+     * The players as loaded from the scenario, captured before the game runs. The end-of-game standings are
+     * collected from this snapshot rather than from the live player list, because every bot disconnects itself
+     * when the VICTORY phase is announced ({@code BotClient#changePhase}) and the server then removes its player
+     * from the game entirely ({@code TWGameManager#disconnect}). That removal races the standings collection, so
+     * by the time standings are read a wiped (or even winning) team's player may already be gone - see issue #8700.
+     * {@code Game#removePlayer} only drops the list entry; these Player objects stay valid, and the server reuses
+     * them when the bot clients connect to claim their slots.
+     */
+    private final List<Player> playersAtGameStart;
+
     public ScenarioGameRunner(File scenarioFile) throws Exception {
         TWGameManager gameManager = new TWGameManager();
         Random random = new Random();
@@ -123,6 +150,7 @@ public class ScenarioGameRunner {
             server.setGame(game);
             scenario.applyDamage(gameManager);
             gameManager.calculatePlayerInitialCounts();
+            playersAtGameStart = List.copyOf(game.getPlayersList());
         } catch (Exception constructionFailure) {
             server.die();
             throw constructionFailure;
@@ -130,14 +158,46 @@ public class ScenarioGameRunner {
     }
 
     /**
-     * The result of a single scenario game: whether it finished (rather than timing out) and which team won,
-     * defined as the sole surviving combatant team. The unit-less headless watcher is ignored, and a game that
-     * ends with more than one (or no) combatant team still standing is a draw.
+     * The result of a single scenario game: whether it finished (rather than timing out), which team won -
+     * defined as the sole surviving combatant team - and the end-of-game standing of every combatant team.
+     * The unit-less headless watcher is ignored, and a game that ends with more than one (or no) combatant
+     * team still standing is a draw.
      *
-     * @param finished    whether the game finished within the timeout
-     * @param winningTeam the sole surviving combatant team, or {@link Player#TEAM_NONE} for a draw
+     * @param finished      whether the game finished within the timeout
+     * @param winningTeam   the sole surviving combatant team, or {@link Player#TEAM_NONE} for a draw
+     * @param rounds        the round the game ended on
+     * @param teamStandings the end-of-game standing of each combatant team, ordered by team id
      */
-    public record GameResult(boolean finished, int winningTeam) {}
+    public record GameResult(boolean finished, int winningTeam, int rounds, List<TeamStanding> teamStandings) {}
+
+    /**
+     * The end-of-game standing of one combatant team. Ejected crew entities are not counted as units. Units
+     * whose removal condition is neither destruction nor retreat (for example never-deployed units) appear in
+     * {@code unitsFielded} only.
+     *
+     * @param team              the team id
+     * @param unitsFielded      units the team started the game with
+     * @param survivors         units still on the board and not destroyed at game end
+     * @param crippledSurvivors survivors that report {@link Entity#isCrippled()}
+     * @param destroyed         units destroyed, whether salvageable, devastated, or lost with their crew
+     * @param fled              units that left the board in retreat, were captured, or were pushed off
+     * @param bvInitial         the team's total Battle Value at game start
+     * @param bvRemaining       the team's total Battle Value of usable assets still in play at game end,
+     *                          per {@link Player#getBV()} (units counting toward the strength sum)
+     */
+    public record TeamStanding(int team, int unitsFielded, int survivors, int crippledSurvivors, int destroyed,
+          int fled, int bvInitial, int bvRemaining) {}
+
+    /** Mutable accumulator behind {@link TeamStanding}, keyed by team while walking players and entities. */
+    private static final class TeamTally {
+        private int unitsFielded;
+        private int survivors;
+        private int crippledSurvivors;
+        private int destroyed;
+        private int fled;
+        private int bvInitial;
+        private int bvRemaining;
+    }
 
     /**
      * Connects the watcher and bots, then runs the game.
@@ -180,6 +240,7 @@ public class ScenarioGameRunner {
             }
         });
 
+        connectedClients.add(watcher);
         if (!watcher.connect()) {
             throw new IllegalStateException("Watcher client failed to connect to the local server");
         }
@@ -191,6 +252,7 @@ public class ScenarioGameRunner {
                   LOCALHOST_IP,
                   server.getPort(),
                   behaviorFor(botSlot.getName()));
+            connectedClients.add(botClient);
             if (!botClient.connect()) {
                 throw new IllegalStateException("Bot failed to connect for player " + botSlot.getName());
             }
@@ -207,32 +269,152 @@ public class ScenarioGameRunner {
         } else {
             logger.error("Scenario game timed out");
         }
-        return new GameResult(finished, determineWinningTeam(watcherSlot.getTeam()));
+        return new GameResult(finished,
+              determineWinningTeam(game, playersAtGameStart, watcherSlot.getTeam()),
+              game.getCurrentRound(),
+              collectTeamStandings(game, playersAtGameStart, watcherSlot.getTeam()));
+    }
+
+    /**
+     * Collects the end-of-game standing of every combatant team: units fielded, survivors (and how many of them
+     * are crippled), destroyed and fled counts, and Battle Value at start versus game end. Ejected crew entities
+     * are skipped so a unit and its ejected pilot are not counted twice.
+     *
+     * <p>Teams and entity ownership are resolved through the game-start player snapshot, not the live player
+     * list: a bot whose side was wiped disconnects at VICTORY and its player is removed from the game, which
+     * would otherwise silently drop that team's standing entirely (issue #8700).</p>
+     *
+     * <p>Package-private and static so the wiped-team regression test can drive it without a live server.</p>
+     *
+     * @param game               the game to collect standings from
+     * @param playersAtGameStart every player as of game start, including any since removed
+     * @param watcherTeam        the team of the headless watcher, which is excluded
+     *
+     * @return one {@link TeamStanding} per combatant team, ordered by team id
+     */
+    static List<TeamStanding> collectTeamStandings(Game game, List<Player> playersAtGameStart, int watcherTeam) {
+        Map<Integer, Integer> teamByPlayerId = teamByPlayerId(playersAtGameStart);
+        Map<Integer, TeamTally> tallies = new TreeMap<>();
+
+        for (Player player : playersAtGameStart) {
+            if (player.getTeam() == watcherTeam) {
+                continue;
+            }
+            TeamTally tally = tallies.computeIfAbsent(player.getTeam(), team -> new TeamTally());
+            tally.unitsFielded += player.getInitialEntityCount();
+            tally.bvInitial += player.getInitialBV();
+            tally.bvRemaining += player.getBV();
+        }
+
+        for (Entity entity : game.getEntitiesVector()) {
+            TeamTally tally = tallyFor(tallies, entity, teamByPlayerId, watcherTeam);
+            if (tally == null) {
+                continue;
+            }
+            if (entity.isDestroyed()) {
+                tally.destroyed++;
+            } else {
+                tally.survivors++;
+                if (entity.isCrippled()) {
+                    tally.crippledSurvivors++;
+                }
+            }
+        }
+
+        for (Entity entity : game.getOutOfGameEntitiesVector()) {
+            TeamTally tally = tallyFor(tallies, entity, teamByPlayerId, watcherTeam);
+            if (tally == null) {
+                continue;
+            }
+            switch (entity.getRemovalCondition()) {
+                case IEntityRemovalConditions.REMOVE_SALVAGEABLE,
+                     IEntityRemovalConditions.REMOVE_EJECTED,
+                     IEntityRemovalConditions.REMOVE_DEVASTATED -> tally.destroyed++;
+                case IEntityRemovalConditions.REMOVE_IN_RETREAT,
+                     IEntityRemovalConditions.REMOVE_CAPTURED,
+                     IEntityRemovalConditions.REMOVE_PUSHED -> tally.fled++;
+                default -> { } // never deployed or unknown; counted in unitsFielded only
+            }
+        }
+
+        List<TeamStanding> standings = new ArrayList<>();
+        for (Map.Entry<Integer, TeamTally> entry : tallies.entrySet()) {
+            TeamTally tally = entry.getValue();
+            standings.add(new TeamStanding(entry.getKey(), tally.unitsFielded, tally.survivors,
+                  tally.crippledSurvivors, tally.destroyed, tally.fled, tally.bvInitial, tally.bvRemaining));
+        }
+        return standings;
+    }
+
+    /**
+     * Returns the tally the given entity counts toward, or {@code null} when it should not be counted:
+     * watcher-team entities and entities of unknown ownership are not combatants, and ejected crew are not
+     * units. Ownership is resolved by owner id against the game-start snapshot, because the owner's player
+     * may already have been removed from the game (see {@link #playersAtGameStart}).
+     */
+    private static @Nullable TeamTally tallyFor(Map<Integer, TeamTally> tallies, Entity entity,
+          Map<Integer, Integer> teamByPlayerId, int watcherTeam) {
+        Integer team = teamByPlayerId.get(entity.getOwnerId());
+        if ((team == null) || (team == watcherTeam) || (entity instanceof EjectedCrew)) {
+            return null;
+        }
+        return tallies.computeIfAbsent(team, teamId -> new TeamTally());
     }
 
     /**
      * Determines the winner as the sole combatant team with surviving units, ignoring the unit-less watcher.
+     * Entity ownership is resolved by owner id against the game-start snapshot, so a winner whose bot has
+     * already disconnected (and had its player removed) is not misreported as a draw.
      *
-     * @param watcherTeam the team of the headless watcher, which is excluded
+     * <p>Package-private and static so the wiped-team regression test can drive it without a live server.</p>
+     *
+     * @param game               the game to determine the winner of
+     * @param playersAtGameStart every player as of game start, including any since removed
+     * @param watcherTeam        the team of the headless watcher, which is excluded
      *
      * @return the sole surviving combatant team, or {@link Player#TEAM_NONE} if zero or more than one remain
      */
-    private int determineWinningTeam(int watcherTeam) {
+    static int determineWinningTeam(Game game, List<Player> playersAtGameStart, int watcherTeam) {
+        Map<Integer, Integer> teamByPlayerId = teamByPlayerId(playersAtGameStart);
         Set<Integer> survivingTeams = new TreeSet<>();
         for (Entity entity : game.getEntitiesVector()) {
-            Player owner = entity.getOwner();
-            if (!entity.isDestroyed() && (owner != null) && (owner.getTeam() != watcherTeam)) {
-                survivingTeams.add(owner.getTeam());
+            Integer team = teamByPlayerId.get(entity.getOwnerId());
+            if (!entity.isDestroyed() && (team != null) && (team != watcherTeam)) {
+                survivingTeams.add(team);
             }
         }
         return (survivingTeams.size() == 1) ? survivingTeams.iterator().next() : Player.TEAM_NONE;
     }
 
     /**
-     * Shuts down this runner's server, releasing its port and connections. Call between games when running many
-     * in one process.
+     * Maps each game-start player's id to their team, for resolving entity ownership after a player has been
+     * removed from the game.
+     */
+    private static Map<Integer, Integer> teamByPlayerId(List<Player> playersAtGameStart) {
+        Map<Integer, Integer> teamByPlayerId = new HashMap<>();
+        for (Player player : playersAtGameStart) {
+            teamByPlayerId.put(player.getId(), player.getTeam());
+        }
+        return teamByPlayerId;
+    }
+
+    /**
+     * Disconnects every client this runner connected, then shuts down its server, releasing the port. Call between
+     * games when running many in one process.
+     *
+     * <p>Clients are disconnected before the server dies so each one closes its socket and, for a bot, stops its
+     * precognition thread. Skipping this is what makes a long batch degrade: see {@link #connectedClients}.</p>
      */
     public void shutdown() {
+        for (AbstractClient client : connectedClients) {
+            try {
+                client.die();
+            } catch (Exception exception) {
+                // A client that fails to shut down cleanly must not stop the others being released.
+                logger.warn(exception, "Failed to disconnect client " + client.getName());
+            }
+        }
+        connectedClients.clear();
         server.die();
     }
 

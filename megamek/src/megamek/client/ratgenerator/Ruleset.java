@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2016-2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -41,12 +41,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.xml.parsers.DocumentBuilder;
 
+import jakarta.annotation.Nullable;
 import megamek.client.generator.RandomNameGenerator;
-import megamek.common.annotations.Nullable;
+import megamek.common.Configuration;
 import megamek.common.units.EntityWeightClass;
 import megamek.logging.MMLogger;
 import megamek.utilities.xml.MMXMLUtility;
@@ -86,7 +88,10 @@ public class Ruleset {
         }
     }
 
-    private static final String directory = "data/forcegenerator/faction_rules";
+    // Subdirectory of Configuration.forceGeneratorDir() holding the faction ruleset files. Resolved
+    // through the configured data directory (not a hardcoded relative path) so -data_dir and the RAT
+    // editor's alternate-directory option relocate the rulesets together with the era files.
+    private static final String FACTION_RULES_SUBDIR = "faction_rules";
     private static final String CONSTANTS_FILE = "constants.txt";
 
     // Progress-bar weights for the phases of processRoot(), as fractions of the force-generation
@@ -95,6 +100,13 @@ public class Ruleset {
     private static final double PROGRESS_GENERATE_UNITS = 0.5;
     private static final double PROGRESS_LOAD_ENTITIES = 0.4;
     private static final double PROGRESS_FINALIZE = 0.05;
+
+    /**
+     * Upper bound on ruleset parent links followed when resolving an inherited value. The shipped data
+     * is at most three deep (for example {@code CFM.MiKrKl -> CFM -> CLAN}); this only exists to stop
+     * a mis-authored cycle from hanging generation.
+     */
+    private static final int MAX_PARENT_CHAIN_DEPTH = 16;
 
     private static HashMap<String, String> constants;
     private static final Pattern constantPattern = Pattern.compile("%(.*?)%");
@@ -110,6 +122,7 @@ public class Ruleset {
     private final HashMap<Integer, String> customRanks;
     private final ArrayList<ForceNode> forceNodes;
     private String parent;
+    private FormationNamingConvention formationNaming;
 
     private Ruleset() {
         faction = FactionRecord.IS_GENERAL_KEY;
@@ -119,6 +132,7 @@ public class Ruleset {
         customRanks = new HashMap<>();
         forceNodes = new ArrayList<>();
         parent = null;
+        formationNaming = new FormationNamingConvention();
     }
 
     public static String substituteConstants(String str) {
@@ -146,6 +160,11 @@ public class Ruleset {
             return rulesets.get(faction);
         }
         FactionRecord fRec = RATGenerator.getInstance().getFaction(faction);
+        Ruleset canonicalRuleset = findCanonicalRuleset(faction, fRec, rulesets);
+        if (canonicalRuleset != null) {
+            logger.debug("findRuleset({}): alias of {}", faction, canonicalRuleset.getFaction());
+            return canonicalRuleset;
+        }
         /*
          * First check all parents without recursion. If none is found, do
          * a recursive check on all parents.
@@ -168,8 +187,35 @@ public class Ruleset {
         }
         // This shouldn't happen unless the data is missing. Throw out a default ruleset
         // to prevent barfing.
-        logger.warn("findRuleset({}): no match in any parent — returning empty default ruleset", faction);
+        logger.warn("findRuleset({}): no match in any parent - returning empty default ruleset", faction);
         return new Ruleset();
+    }
+
+    /**
+     * The ruleset of the faction a key is an alias of, when it has one.
+     *
+     * <p>A faction renamed across eras keeps its old keys as aliases: the Escorpion Imperio ({@code CEI}) and the
+     * Scorpion Empire ({@code SE}) are both Clan Goliath Scorpion ({@code CGS}). Looking up an alias returns the
+     * faction it stands for, so the lookup has to try that faction's own ruleset before its parents. Without this
+     * the Scorpion Empire skipped the Goliath Scorpion ruleset, which models its mixed Trinaries and Clusters, and
+     * fell through to the generic Clan one.</p>
+     *
+     * @param faction          the key that was asked for
+     * @param resolvedFaction  the faction record that key resolves to, or {@code null} when it resolves to none
+     * @param rulesetsByFaction the loaded rulesets, by faction key
+     *
+     * @return the resolved faction's ruleset, or {@code null} when the key is not an alias or that faction has none
+     */
+    static @Nullable Ruleset findCanonicalRuleset(String faction, @Nullable FactionRecord resolvedFaction,
+          Map<String, Ruleset> rulesetsByFaction) {
+        if (resolvedFaction == null) {
+            return null;
+        }
+        String canonicalKey = resolvedFaction.getKey();
+        if ((canonicalKey == null) || canonicalKey.equals(faction)) {
+            return null;
+        }
+        return rulesetsByFaction.get(canonicalKey);
     }
 
     @Deprecated(since = "0.51.0", forRemoval = true)
@@ -193,6 +239,37 @@ public class Ruleset {
         void updateProgress(double progress, String message);
     }
 
+    /**
+     * Builds the force's structure without generating any units.
+     *
+     * <p>Produces the same tree {@link #processRoot} would - the same echelons, weight classes and formation
+     * assignments, and so the same {@link ForceDescriptor#getEligibleFormations() eligible formation sets} - but stops
+     * before a single unit is drawn. It exists so a caller can ask what a force <em>would</em> look like without
+     * paying for it: the progress weights in this class put building the tree at a twentieth of a full generation,
+     * against half for picking units and most of the rest for loading entities.</p>
+     *
+     * <p>Asking the generator rather than re-deriving rule matching by hand is the point. Which formations a node is
+     * offered depends on properties that only exist once the tree is being built - the weight class it rolled, its
+     * index among its siblings, the flags it inherited - so any prediction made from the ruleset XML alone would be
+     * an approximation that drifts from what generation actually does.</p>
+     *
+     * <p>The descriptor is modified in place, exactly as {@code processRoot} modifies it. Callers previewing a force
+     * they intend to generate later should pass a throwaway copy.</p>
+     *
+     * @param fd the force to build the structure of, modified in place
+     */
+    public void buildStructureOnly(ForceDescriptor fd) {
+        defaults.apply(fd);
+        // Bracket the shared name-generator faction the same way processRoot does, so a preview run cannot leave
+        // global state changed behind it. A preview may run on every change to the options panel.
+        String rngFaction = RandomNameGenerator.getInstance().getChosenFaction();
+        try {
+            buildForceTree(fd, null, 0);
+        } finally {
+            RandomNameGenerator.getInstance().setChosenFaction(rngFaction);
+        }
+    }
+
     public void processRoot(ForceDescriptor fd, ProgressListener l) {
         logger.debug("[ForceGen][Weight] processRoot ENTER: faction={} echelon={} unitType={} rating={} " +
                     "weightClass={} ({})",
@@ -203,6 +280,12 @@ public class Ruleset {
         // save the setting so it can be restored after assigning names
         String rngFaction = RandomNameGenerator.getInstance().getChosenFaction();
 
+        if (fd.getInfantryClass() != null) {
+            logger.info("[ForceGen][InfantryClass] processRoot: faction={} unitType={} infantryClass={} options={}",
+                  fd.getFaction(), fd.getUnitType(), fd.getInfantryClass(), fd.getFlags());
+        }
+        // Before the tree is built, so every node copies the pinned beast from its parent
+        BeastMountSelector.pinBeast(fd);
         buildForceTree(fd, l, PROGRESS_BUILD_TREE);
         // Capture the weight class the ruleset ROLLED for this force (the value that drove the
         // <weightTarget> selection) before recalcWeightClass() below overwrites it with the
@@ -215,21 +298,35 @@ public class Ruleset {
         // blocks before units are picked. Data-gated -- a no-op for any cluster that declares no
         // targets, so factions without <weightTarget> generate exactly as before.
         WeightBudgetAllocator.allocate(fd);
+        // Reshape which formation each node gets to match the requested mix, before those formations pick their
+        // units. Only formations the node's own rule offered are ever assigned, and a node the mix does not claim
+        // keeps what the ruleset rolled for it. A no-op for an empty mix.
+        FormationMixReport formationAssignment = FormationBudgetAllocator.allocate(fd);
         fd.generateUnits(l, PROGRESS_GENERATE_UNITS);
-        if (null != l) {
+        // A slot the unit tables could not fill would otherwise get a commander below and show as a pilot with
+        // nothing to crew (and as an empty force in MekHQ).
+        fd.removeNodesWithoutUnits();
+        // Count what survived rather than what was asked for: a formation can be assigned legally and still fail its
+        // own requirements once units are drawn, at which point it reverts to an ordinary lance.
+        fd.setFormationMixReport(FormationBudgetAllocator.tallyAchieved(fd, formationAssignment));
+        if (l != null) {
             l.updateProgress(0, "Finalizing formation");
         }
         fd.recalcWeightClass();
         // Optional: fill each large craft's ASF bays with its carried fighter complement and nest the
         // fighters under the ship. Run before commander/id/entity assignment so the normal passes handle
         // the new fighters. Off unless the user ticks the option.
+        //
+        // This pass only sees large craft that are part of the force itself (a DropShip or WarShip
+        // force generated directly). Carriers produced by the transport stage do not exist yet; they
+        // get their complement further down, right after assignTransport attaches them.
         if (fd.isFighterComplement()) {
             fd.addFighterComplement();
         }
         fd.assignCommanders();
         fd.assignPositions();
 
-        if (null != l) {
+        if (l != null) {
             l.updateProgress(PROGRESS_FINALIZE, "Finalizing formation");
         }
         // Stamp every node with a unique force id before loading entities, so the force strings
@@ -239,15 +336,23 @@ public class Ruleset {
         // fd.assignBloodnames();
 
         ForceDescriptor transports = fd.assignTransport();
-        if (null != transports) {
+        if (transports != null) {
             // Attach first so the transports' parent is set, then number and load them; their force
             // strings then correctly nest the transport force under the force it carries.
             fd.addAttached(transports);
+            // The transport DropShips are created here, long after the fighter-complement pass above
+            // ran, so they must be filled now or the option silently does nothing for any carrier the
+            // player got from the Dropship Percentage setting - which is where nearly all of them come
+            // from. This has to happen before assignForceIds/loadEntities below so the new fighters
+            // still receive ids and entities from those passes.
+            if (fd.isFighterComplement()) {
+                transports.addFighterComplement();
+            }
             transports.assignForceIds(nextForceId);
             transports.loadEntities(l, 0);
         }
 
-        if (null != l) {
+        if (l != null) {
             l.updateProgress(0, "Complete");
         }
 
@@ -411,7 +516,7 @@ public class Ruleset {
          * sub.assignBloodnames();
          * }
          */
-        if (count == 0 && null != l) {
+        if (count == 0 && l != null) {
             l.updateProgress(progress, "Building force tree");
         }
     }
@@ -446,6 +551,28 @@ public class Ruleset {
         return result;
     }
 
+    /**
+     * Returns every rating better than the given one in this ruleset's rating system, closest first. The counterpart
+     * of {@link #getRatingsAtOrWorseThan(String)} for the rare pick that may step up when nothing at or below the
+     * force's rating fits, such as a strict infantry class.
+     *
+     * @param rating the force's own equipment rating
+     *
+     * @return the better ratings, closest first; empty when the rating is the best or not part of this system
+     */
+    public List<String> getRatingsBetterThan(String rating) {
+        List<String> result = new ArrayList<>();
+        int ratingIndex = ratingSystem.indexOf(rating);
+        if (ratingIndex < 0) {
+            return result;
+        }
+        // RatingSystem values are ordered worst-to-best, so better ratings are higher indices.
+        for (int i = ratingIndex + 1; i < ratingSystem.vals.length; i++) {
+            result.add(ratingSystem.vals[i]);
+        }
+        return result;
+    }
+
     public Integer getDefaultUnitType(ForceDescriptor fd) {
         String def = defaults.getUnitType(fd);
         if (def != null) {
@@ -464,6 +591,28 @@ public class Ruleset {
 
     public TOCNode getTOCNode() {
         return toc;
+    }
+
+    /**
+     * The table of contents the Force Generator menus come from: this ruleset's own, or the nearest parent's when this
+     * one has none. A ruleset file with no {@code <toc>} still gets an empty one, so an empty table counts as none.
+     * Without that, the Calderon Protectorate (whose file only names the Taurian Concordat as its parent) offered no
+     * unit types or sizes at all.
+     *
+     * @param ruleset the ruleset to start from, or {@code null}
+     *
+     * @return the table of contents, or {@code null} when no ruleset in the chain has one
+     */
+    public static @Nullable TOCNode findTOCNode(@Nullable Ruleset ruleset) {
+        Ruleset current = ruleset;
+        while (current != null) {
+            TOCNode toc = current.getTOCNode();
+            if ((toc != null) && !toc.isEmpty()) {
+                return toc;
+            }
+            current = (current.getParent() == null) ? null : findRuleset(current.getParent());
+        }
+        return null;
     }
 
     public ForceNode findForceNode(ForceDescriptor fd) {
@@ -533,6 +682,48 @@ public class Ruleset {
         return parent;
     }
 
+    /**
+     * The naming convention declared directly by this ruleset, without consulting its parents. Use
+     * {@link #findNamingTier(int)} for the inherited view that consumers want.
+     *
+     * @return this file's own {@code <formationNaming>} content, empty when it declares none
+     */
+    public FormationNamingConvention getFormationNaming() {
+        return formationNaming;
+    }
+
+    /**
+     * Resolves the naming rule for one echelon, walking the parent chain the same way force-node
+     * lookup does. Resolution is per echelon rather than per file, so a faction that declares a rule
+     * for a single echelon still inherits its parent's rules for all the others.
+     *
+     * @param echelon the echelon to resolve, as stored on the force node (constants already
+     *                substituted)
+     *
+     * @return the nearest declared rule for {@code echelon}, or {@code null} when neither this
+     *       ruleset nor any of its ancestors declares one - in which case the consumer should keep
+     *       whatever name the ruleset's {@code <name>} elements produced
+     */
+    public @Nullable FormationNamingConvention.Tier findNamingTier(int echelon) {
+        Ruleset current = this;
+        // Parent links come from data and are not validated for cycles at load time; cap the walk so a
+        // mis-authored parent="..." pair cannot hang force generation.
+        for (int depth = 0; (current != null) && (depth <= MAX_PARENT_CHAIN_DEPTH); depth++) {
+            FormationNamingConvention.Tier tier = current.formationNaming.getTier(echelon);
+            if (tier != null) {
+                return tier;
+            }
+            String parentFaction = current.getParent();
+            current = (parentFaction == null) ? null : rulesets.get(parentFaction);
+        }
+        if (current != null) {
+            logger.error("[ForceGen][Naming] parent chain for faction {} exceeded {} links while resolving"
+                        + " echelon {}; check the ruleset files for a parent cycle",
+                  faction, MAX_PARENT_CHAIN_DEPTH, echelon);
+        }
+        return null;
+    }
+
     public static void loadConstants(File f) {
         constants = new HashMap<>();
         InputStream is;
@@ -561,9 +752,9 @@ public class Ruleset {
         initializing = true;
         rulesets = new HashMap<>();
 
-        File dir = new File(directory);
+        File dir = new File(Configuration.forceGeneratorDir(), FACTION_RULES_SUBDIR);
         if (!dir.exists()) {
-            logger.error("Could not locate force generator faction rules.");
+            logger.error("Could not locate force generator faction rules at {}.", dir.getPath());
             initializing = false;
             return;
         }
@@ -649,8 +840,9 @@ public class Ruleset {
                 }
             }
         }
-        // Rating system defaults to IS if not present. If present but cannot be parsed,
-        // is set to NONE.
+        // Rating system defaults to IS if not present. An unrecognized value (for example a typo'd
+        // case like "Clan") also falls back to IS - matching the missing-attribute default - and is
+        // logged, rather than silently setting NONE and stripping rating handling from the file.
         if (!elem.getAttribute("ratingSystem").isBlank()) {
             switch (elem.getAttribute("ratingSystem")) {
                 case "IS":
@@ -666,7 +858,10 @@ public class Ruleset {
                     retVal.ratingSystem = RatingSystem.ROS;
                     break;
                 default:
-                    retVal.ratingSystem = RatingSystem.NONE;
+                    logger.warn("Ruleset for faction {} has unrecognized ratingSystem \"{}\"; expected "
+                                + "IS, SL, CLAN, or ROS. Falling back to IS.",
+                          retVal.faction, elem.getAttribute("ratingSystem"));
+                    retVal.ratingSystem = RatingSystem.IS;
                     break;
             }
         } else {
@@ -683,6 +878,9 @@ public class Ruleset {
                     break;
                 case "toc":
                     retVal.toc = TOCNode.createFromXml(wn);
+                    break;
+                case "formationNaming":
+                    retVal.formationNaming = FormationNamingConvention.createFromXml(wn, retVal.faction);
                     break;
                 case "customRanks":
                     for (int y = 0; y < wn.getChildNodes().getLength(); y++) {

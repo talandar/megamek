@@ -43,10 +43,9 @@ import java.io.PrintWriter;
 import java.util.Locale;
 import java.util.Objects;
 
+import jakarta.annotation.Nullable;
 import megamek.MMConstants;
-import megamek.common.Configuration;
 import megamek.common.moves.MovePath;
-import megamek.common.util.fileUtils.MegaMekFile;
 import megamek.logging.MMLogger;
 
 public class ClientPreferences extends PreferenceStoreProxy {
@@ -60,8 +59,6 @@ public class ClientPreferences extends PreferenceStoreProxy {
     public static final String LAST_SERVER_PORT = "LastServerPort";
     public static final String LOCALE = "Locale";
     public static final String MAP_TILESET = "MapTileset";
-    public static final String MINIMAP_THEME = "MinimapTheme";
-    public static final String STRATEGIC_VIEW_THEME = "StrategicViewTheme";
     public static final String MAX_PATHFINDER_TIME = "MaxPathfinderTime";
     public static final String DATA_DIRECTORY = "DataDirectory";
     public static final String LOG_DIRECTORY = "LogDirectory";
@@ -80,6 +77,12 @@ public class ClientPreferences extends PreferenceStoreProxy {
     public static final String DATA_LOGGING = "GameDatasetLogging";
     public static final String STAMP_FORMAT = "StampFormat";
     public static final String SHOW_UNIT_ID = "ShowUnitId";
+    /**
+     * Whether the lobby unit list shows unit IDs. Separate from {@link #SHOW_UNIT_ID}, which also adds the ID to every
+     * unit name in reports, the game log and tooltips: players need the IDs in the lobby to set bot targets (#9173),
+     * without every report changing.
+     */
+    public static final String LOBBY_SHOW_UNIT_ID = "LobbyShowUnitId";
     public static final String USE_CASPAR = "UseCASPAR";
     public static final String UNIT_START_CHAR = "UnitStartChar";
     public static final String DEFAULT_AUTO_EJECT_DISABLED = "DefaultAutoejectDisabled";
@@ -121,6 +124,8 @@ public class ClientPreferences extends PreferenceStoreProxy {
      * A user-specified directory, typically outside the MM directory, where content may be loaded from.
      */
     public static final String USER_DIR = "UserDir";
+    /** System property that overrides {@link #USER_DIR} for one run without changing the saved preference. */
+    public static final String USER_DIR_PROPERTY = "megamek.userDir";
 
     public static final String MML_PATH = "MmlPath";
 
@@ -133,8 +138,6 @@ public class ClientPreferences extends PreferenceStoreProxy {
         store.setDefault(LAST_CONNECT_PORT, MMConstants.DEFAULT_PORT);
         store.setDefault(LAST_SERVER_PORT, MMConstants.DEFAULT_PORT);
         store.setDefault(MAP_TILESET, "saxarba.tileset");
-        store.setDefault(MINIMAP_THEME, "default.theme");
-        store.setDefault(STRATEGIC_VIEW_THEME, "gbc green.theme");
         store.setDefault(MAX_PATHFINDER_TIME, MovePath.DEFAULT_PATHFINDER_TIME_LIMIT);
         store.setDefault(DATA_DIRECTORY, "data");
         store.setDefault(LOG_DIRECTORY, "logs");
@@ -169,6 +172,7 @@ public class ClientPreferences extends PreferenceStoreProxy {
         store.setDefault(SHOW_AUTO_RESOLVE_PANEL, false);
         store.setDefault(STAMP_FILENAMES, false);
         store.setDefault(USE_CASPAR, false);
+        store.setDefault(LOBBY_SHOW_UNIT_ID, true);
         store.setDefault(FAVORITE_PRINCESS_BEHAVIOR_SETTING, DEFAULT_BEHAVIOR_DESCRIPTION);
         store.setDefault(LAST_SCENARIO, "");
 
@@ -294,6 +298,13 @@ public class ClientPreferences extends PreferenceStoreProxy {
     }
 
     /**
+     * @return {@code true} when the lobby unit list shows unit IDs, which is the default
+     */
+    public boolean getLobbyShowUnitId() {
+        return store.getBoolean(LOBBY_SHOW_UNIT_ID);
+    }
+
+    /**
      * @return {@code true} if the experimental CASPAR bot is offered as a selectable AI. This is a hidden
      *       option: it is not shown in any settings UI and defaults to {@code false}; enable it by hand-adding
      *       {@code <UseCASPAR>true</UseCASPAR>} to clientsettings.xml.
@@ -401,6 +412,13 @@ public class ClientPreferences extends PreferenceStoreProxy {
         store.setValue(SHOW_UNIT_ID, state);
     }
 
+    /**
+     * @param state {@code true} to show unit IDs in the lobby unit list
+     */
+    public void setLobbyShowUnitId(boolean state) {
+        store.setValue(LOBBY_SHOW_UNIT_ID, state);
+    }
+
     public void setUnitStartChar(char c) {
         store.setValue(UNIT_START_CHAR, c);
     }
@@ -453,25 +471,6 @@ public class ClientPreferences extends PreferenceStoreProxy {
 
     public boolean getEnableExperimentalBotFeatures() {
         return store.getBoolean(ENABLE_EXPERIMENTAL_BOT_FEATURES);
-    }
-
-    public void setStrategicViewTheme(String theme) {
-        store.setValue(STRATEGIC_VIEW_THEME, theme);
-    }
-
-    public File getStrategicViewTheme() {
-        return new MegaMekFile(Configuration.minimapThemesDir(), store.getString(STRATEGIC_VIEW_THEME)).getFile();
-    }
-
-    public void setMinimapTheme(String theme) {
-        if (theme == null) {
-            return;
-        }
-        store.setValue(MINIMAP_THEME, theme);
-    }
-
-    public File getMinimapTheme() {
-        return new MegaMekFile(Configuration.minimapThemesDir(), store.getString(MINIMAP_THEME)).getFile();
     }
 
     protected Locale locale = null;
@@ -535,18 +534,57 @@ public class ClientPreferences extends PreferenceStoreProxy {
     }
 
     /**
-     * @return The absolute user directory path (usually outside of MM). Does not end in a slash or backslash.
+     * @return The absolute user directory path (usually outside of MM). Does not end in a slash or backslash unless it
+     *       is a filesystem root such as {@code /} or {@code C:\}. When the
+     *       {@link #USER_DIR_PROPERTY} system property is set (for example by the MegaMek Launcher), it takes precedence
+     *       over the saved preference for this run.
      */
     public String getUserDir() {
-        return store.getString(USER_DIR);
+        String override = userDirOverride();
+        return (override != null) ? override : store.getString(USER_DIR);
+    }
+
+    /**
+     * @return {@code true} when the user directory comes from the {@link #USER_DIR_PROPERTY} system property for this
+     *       run, so the saved preference is not in effect; {@code false} otherwise
+     */
+    public boolean isUserDirOverridden() {
+        return userDirOverride() != null;
     }
 
     public void setUserDir(String userDir) {
-        // remove directory separators at the end
-        while (!userDir.isBlank() && (userDir.endsWith("/") || userDir.endsWith("\\"))) {
-            userDir = userDir.substring(0, userDir.length() - 1);
+        userDir = stripTrailingSeparators(userDir);
+        // Never persist the launch-time override as the user's own saved preference
+        if (userDir.equals(userDirOverride())) {
+            return;
         }
         store.setValue(USER_DIR, userDir);
+    }
+
+    /**
+     * @return the user directory set by the {@link #USER_DIR_PROPERTY} system property for this run, or {@code null}
+     *       when the property is not set or blank
+     */
+    static @Nullable String userDirOverride() {
+        String value = System.getProperty(USER_DIR_PROPERTY);
+        if ((value == null) || value.isBlank()) {
+            return null;
+        }
+        return stripTrailingSeparators(value.strip());
+    }
+
+    static String stripTrailingSeparators(String directory) {
+        while (!directory.isBlank() && (directory.endsWith("/") || directory.endsWith("\\"))
+              && !isFilesystemRoot(directory)) {
+            directory = directory.substring(0, directory.length() - 1);
+        }
+        return directory;
+    }
+
+    /** Roots keep their separator: {@code /} and {@code C:\} differ from an empty or drive-relative path. */
+    private static boolean isFilesystemRoot(String directory) {
+        return directory.equals("/") || directory.equals("\\")
+              || directory.matches("[A-Za-z]:[/\\\\]");
     }
 
     public String getMmlPath() {

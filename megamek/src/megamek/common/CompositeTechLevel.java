@@ -41,7 +41,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.stream.Collectors;
 
-import megamek.common.annotations.Nullable;
+import jakarta.annotation.Nullable;
 import megamek.common.enums.AvailabilityValue;
 import megamek.common.enums.Era;
 import megamek.common.enums.Faction;
@@ -449,7 +449,7 @@ public class CompositeTechLevel implements ITechnology, Serializable {
             } else if (previous.end == null) {
                 break;
             } else if (dr.start <= previous.end) {
-                if ((null == dr.end) || (previous.end < dr.end)) {
+                if ((dr.end == null) || (previous.end < dr.end)) {
                     previous.end = dr.end;
                 }
             } else {

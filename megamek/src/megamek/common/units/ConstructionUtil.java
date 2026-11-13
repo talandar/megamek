@@ -38,8 +38,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+import jakarta.annotation.Nullable;
 import megamek.common.CriticalSlot;
-import megamek.common.annotations.Nullable;
 import megamek.common.battleArmor.BattleArmor;
 import megamek.common.equipment.AmmoMounted;
 import megamek.common.equipment.EquipmentType;
@@ -120,7 +120,7 @@ public class ConstructionUtil {
                 removeCriticalSlots(unit, a);
                 Mounted<?> moveTo = findUnallocatedAmmo(unit, a.getType());
 
-                if (null != moveTo) {
+                if (moveTo != null) {
                     moveTo.setShotsLeft(moveTo.getBaseShotsLeft() + a.getBaseShotsLeft());
                     removeMounted(unit, a);
                 }

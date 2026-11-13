@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2025-2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -33,15 +33,16 @@
 
 package megamek.client.ui.dialogs.BotCommands;
 
-import java.awt.Color;
 import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.GridLayout;
 import java.awt.event.ActionListener;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -52,20 +53,24 @@ import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
-import javax.swing.UIManager;
 
+import jakarta.annotation.Nullable;
 import megamek.client.AbstractClient;
 import megamek.client.bot.princess.ArtilleryCommandAndControl.ArtilleryOrder;
 import megamek.client.bot.princess.ArtilleryCommandAndControl.SpecialAmmo;
+import megamek.client.bot.princess.BehaviorSettings;
 import megamek.client.bot.princess.BehaviorSettingsFactory;
-import megamek.client.bot.princess.CardinalEdge;
 import megamek.client.bot.princess.ChatCommands;
+import megamek.client.bot.princess.CombatPosture;
 import megamek.client.ui.Messages;
 import megamek.client.ui.clientGUI.ClientGUI;
+import megamek.client.ui.clientGUI.GUIPreferences;
 import megamek.client.ui.clientGUI.audio.AudioService;
 import megamek.client.ui.clientGUI.audio.SoundType;
 import megamek.client.ui.clientGUI.boardview.BoardView;
 import megamek.client.ui.clientGUI.boardview.overlay.ToastLevel;
+import megamek.client.ui.dialogs.buttonDialogs.BotTargetPickerDialog;
+import megamek.client.ui.enums.DialogResult;
 import megamek.client.ui.util.KeyCommandBind;
 import megamek.client.ui.util.MegaMekController;
 import megamek.client.ui.util.MenuScroller;
@@ -73,7 +78,6 @@ import megamek.client.ui.util.UIUtil;
 import megamek.client.ui.widget.MegaMekButton;
 import megamek.client.ui.widget.SkinSpecification;
 import megamek.common.Player;
-import megamek.common.annotations.Nullable;
 import megamek.common.board.Board;
 import megamek.common.board.Coords;
 import megamek.common.enums.GamePhase;
@@ -82,8 +86,11 @@ import megamek.common.equipment.WeaponMounted;
 import megamek.common.equipment.WeaponType;
 import megamek.common.event.GameListenerAdapter;
 import megamek.common.event.GamePhaseChangeEvent;
+import megamek.common.game.Game;
+import megamek.common.game.IGame;
 import megamek.common.game.InGameObject;
 import megamek.common.options.OptionsConstants;
+import megamek.common.orders.OrderEligibility;
 import megamek.common.units.Entity;
 import megamek.logging.MMLogger;
 
@@ -96,17 +103,30 @@ import megamek.logging.MMLogger;
  */
 public class BotCommandsPanel extends JPanel {
     private static final MMLogger LOGGER = MMLogger.create(BotCommandsPanel.class);
+    private static final GUIPreferences GUIP = GUIPreferences.getInstance();
 
     private final AbstractClient client;
     private final AudioService audioService;
     private final MegaMekController controller;
     private final ClientGUI clientGUI;
+    private String serverPassword = "";
     private final MegaMekButton miscButton =
           new MegaMekButton("", SkinSpecification.UIComponents.PhaseDisplayButton.getComp());
     // This latch is used only to change the state of the button from pause to continue and back
     private boolean pauseLatch = false;
+    // a watched bots-only game is paused once, as it starts; set again each time the game returns to the lobby
+    private boolean isStartPauseDue = true;
+    /** How many groups the Move Order menu shows before it scrolls, so a bot with thirty lances still fits. */
+    private static final int MOVE_ORDER_SCROLL_THRESHOLD = 20;
+    /**
+     * Explains an empty Move Order or Quick Orders popup: the player commands bots, but none of their units take unit
+     * orders - see {@link megamek.common.orders.OrderEligibility}.
+     */
+    private static final String NO_ORDERABLE_UNITS_KEY = "BotCommandPanel.emptyPopup.noOrderableUnits";
+
     private MegaMekButton pauseContinue;
     private List<MegaMekButton> commandButtons = List.of();
+    private BotOrdersMenuBuilder ordersMenuBuilder;
 
     /**
      * Bot Commands Panel constructor.
@@ -187,38 +207,65 @@ public class BotCommandsPanel extends JPanel {
 
     private void initialize() {
         applyLayout(false);
-        applyTopBarBackground();
-        var retreat = createButton("Retreat");
+        UIUtil.applyTopBarBackground(this);
+        ordersMenuBuilder = new BotOrdersMenuBuilder(client,
+              (orderDescription, singleHex, onPicked) -> pickTargetHexes(orderDescription, singleHex, 0,
+                    "BotCommandPanel.WaypointPrompt.message", onPicked),
+              this::acknowledgeOrder);
         pauseContinue = createButton("PauseGame");
+        var moveOrder = createButton("MoveOrder");
+        var quickOrders = createButton("QuickOrders");
+        var targets = createButton("Targets");
         var maneuver = createButton("Maneuver");
-        var priorityTarget = createButton("PriorityTarget");
-        var ignoreTarget = createButton("IgnoreTarget");
         var setBehavior = createButton("SetBehavior");
         var artillery = createButton("Artillery");
-        var waypoints = createButton("Waypoints");
-        commandButtons = List.of(retreat, maneuver, priorityTarget, ignoreTarget, setBehavior, artillery,
-              waypoints);
+        commandButtons = List.of(moveOrder, quickOrders, targets, maneuver, setBehavior, artillery);
 
+        moveOrder.addActionListener(event -> {
+            // with one bot and nothing to choose between, the editor opens at once; its Choose units... narrows it
+            List<Player> botPlayers = new ArrayList<>();
+            for (Player botPlayer : getBotPlayersUnderYourCommand()) {
+                if (takesUnitOrders(botPlayer)) {
+                    botPlayers.add(botPlayer);
+                }
+            }
+            if (botPlayers.isEmpty()) {
+                showCasparOnlyNotice();
+                return;
+            }
+            if ((clientGUI != null) && (botPlayers.size() == 1)) {
+                List<BotOrdersMenuBuilder.OrderGroup> lances = ordersMenuBuilder.lanceGroupsFor(botPlayers.getFirst());
+                if (lances.size() == 1) {
+                    openMoveOrder(botPlayers.getFirst(), lances.getFirst());
+                    return;
+                }
+            }
+            showButtonPopup(moveOrder, this::createMoveOrderPopup, NO_ORDERABLE_UNITS_KEY);
+        });
+        quickOrders.addActionListener(event -> {
+            if (!anyBotTakesUnitOrders()) {
+                showCasparOnlyNotice();
+                return;
+            }
+            showButtonPopup(quickOrders, this::createQuickOrdersPopup, NO_ORDERABLE_UNITS_KEY);
+        });
+        targets.addActionListener(event -> showButtonPopup(targets, this::createTargetsPopup));
         maneuver.addActionListener(evt -> showButtonPopup(maneuver, this::createManeuverPopup));
-        priorityTarget.addActionListener(evt -> showButtonPopup(priorityTarget, this::createPriorityTargetPopup));
-        ignoreTarget.addActionListener(evt -> showButtonPopup(ignoreTarget, this::createIgnoreTargetPopup));
-        retreat.addActionListener(evt -> showButtonPopup(retreat, this::createRetreatPopup));
         setBehavior.addActionListener(evt -> showButtonPopup(setBehavior, this::createSelectBehaviorPopup));
         artillery.addActionListener(evt -> showButtonPopup(artillery, this::createArtilleryPopup));
-        waypoints.addActionListener(evt -> showButtonPopup(waypoints, this::createWaypointsPopup));
         pauseContinue.addActionListener(evt -> pauseUnpause());
 
         // Add them to the buttonPanel. With 2 rows set, the grid grows columns as needed.
         this.add(pauseContinue);
+        this.add(moveOrder);
+        this.add(quickOrders);
+        this.add(targets);
         this.add(maneuver);
         this.add(setBehavior);
-        this.add(retreat);
         this.add(artillery);
-        this.add(priorityTarget);
-        this.add(ignoreTarget);
-        this.add(waypoints);
-        this.add(miscButton);
-        // the misc button only becomes visible once a caller configures it (e.g. as Request Victory)
+        // The misc button is only added to the panel once a caller configures it (e.g. as Request Victory). It is left
+        // out until then because GridLayout reserves a cell for a child even while that child is invisible, which would
+        // leave an empty gap at the end of the strip in the GUIs that never configure it.
         miscButton.setEnabled(false);
         miscButton.setVisible(false);
         if (controller != null) {
@@ -228,10 +275,73 @@ public class BotCommandsPanel extends JPanel {
         updateButtonStates();
         client.getGame().addGameListener(new GameListenerAdapter() {
             @Override
-            public void gamePhaseChange(GamePhaseChangeEvent e) {
+            public void gamePhaseChange(GamePhaseChangeEvent event) {
                 updateButtonStates();
+                pauseAtStartWhenWatching(event);
             }
         });
+    }
+
+    /**
+     * Starts a game of bots only, watched by a human, paused: the bots would otherwise deploy and move before the
+     * player can give them a single order (HammerGS, 2026-10-03). Orders are chat commands, which the server handles
+     * while paused, so the player sets roles and routes, then presses Continue.
+     *
+     * <p>Only in the game window, and only with Start bots-only games paused on in the settings: MekHQ's auto-resolve
+     * watches through the Commander window, where nobody would press Continue.</p>
+     *
+     * <p>The pause comes once the bots have deployed, so their units are on the board to give orders to (HammerGS,
+     * 2026-10-04): at the first round's initiative report, before any unit moves. Pausing as the game left the lobby
+     * froze it at Receiving Game Data: the server held the clients' replies while the game was still loading.</p>
+     */
+    private void pauseAtStartWhenWatching(GamePhaseChangeEvent event) {
+        GamePhase newPhase = event.getNewPhase();
+        if (newPhase == GamePhase.LOUNGE) {
+            isStartPauseDue = true;
+            return;
+        }
+        if (!isStartPauseDue) {
+            return;
+        }
+        int round = client.getGame().getCurrentRound();
+        if (!isAfterDeployment(newPhase, round)) {
+            if (newPhase.isInitiativeReport() || (newPhase == GamePhase.DEPLOYMENT)) {
+                LOGGER.info("[BotOrders] no start pause yet in {} (round {}): whether to pause is decided after "
+                      + "deployment; the game is not paused", newPhase, round);
+            }
+            return;
+        }
+        isStartPauseDue = false;
+        if (clientGUI == null) {
+            // MekHQ's auto-resolve and the quick game runner watch through the Commander window: nobody is there to
+            // press Continue
+            LOGGER.info("[BotOrders] game starts unpaused: started without the game window, by MekHQ or a runner");
+            return;
+        }
+        if (!GUIP.getBotCommandsPauseAtStart()) {
+            LOGGER.info("[BotOrders] game starts unpaused: Start bots-only games paused is off in the settings");
+            return;
+        }
+        if (pauseLatch || !canBePaused()) {
+            LOGGER.info("[BotOrders] game starts unpaused: {}", pauseLatch ? "already paused"
+                  : "a human player has units in it");
+            return;
+        }
+        LOGGER.info("[BotOrders] game paused at its start, in {}: only bots have units, so orders can be given first",
+              newPhase);
+        pauseUnpause();
+    }
+
+    /**
+     * @param phase the phase the game is entering
+     * @param round the game's round
+     *
+     * @return {@code true} for the first moment after the opening deployment and before any unit moves: an initiative
+     *       report of round 1 or later, or a movement phase where a game has no report; the deployment happens in round
+     *       0
+     */
+    static boolean isAfterDeployment(GamePhase phase, int round) {
+        return (round >= 1) && (phase.isInitiativeReport() || (phase == GamePhase.MOVEMENT));
     }
 
     /**
@@ -274,6 +384,9 @@ public class BotCommandsPanel extends JPanel {
         this.miscButton.addActionListener(miscButtonActionListener);
         this.miscButton.setEnabled(true);
         this.miscButton.setVisible(true);
+        this.add(miscButton);
+        this.revalidate();
+        this.repaint();
     }
 
     /**
@@ -283,11 +396,40 @@ public class BotCommandsPanel extends JPanel {
         setMiscButton(
               Messages.getString("BotCommandPanel.Victory.title"),
               Messages.getString("BotCommandPanel.Victory.tooltip"),
-              evt -> client.sendChat("/victory"));
+              evt -> client.sendChat(victoryCommand()));
     }
 
     /**
-     * Clears the misc button, removing any text, tooltip, and action listener and disabling it.
+     * @return the {@code /victory} chat command, including the server password when one is set. {@code VictoryCommand}
+     *       rejects a passwordless request on a passworded server, and MekHQ's Host dialog pre-fills the last password.
+     *       See issue #8891.
+     */
+    private String victoryCommand() {
+        return buildVictoryCommand(serverPassword);
+    }
+
+    /**
+     * @param serverPassword the server password, possibly empty/{@code null}
+     *
+     * @return the {@code /victory} chat command, with the password appended when one is present
+     */
+    static String buildVictoryCommand(String serverPassword) {
+        return ((serverPassword == null) || serverPassword.isBlank()) ? "/victory" : ("/victory " + serverPassword);
+    }
+
+    /**
+     * Sets the server password used to authenticate the "Request Victory" command. Pass empty or {@code null} when the
+     * server has no password.
+     *
+     * @param serverPassword the server password
+     */
+    public void setServerPassword(String serverPassword) {
+        this.serverPassword = (serverPassword == null) ? "" : serverPassword;
+    }
+
+    /**
+     * Clears the misc button, removing any text, tooltip, and action listener, disabling it and taking it back out of
+     * the panel so that it does not leave an empty cell behind.
      */
     public void clearMiscButton() {
         this.miscButton.setText("");
@@ -298,6 +440,9 @@ public class BotCommandsPanel extends JPanel {
         }
         this.miscButton.setEnabled(false);
         this.miscButton.setVisible(false);
+        this.remove(miscButton);
+        this.revalidate();
+        this.repaint();
     }
 
     private Collection<Player> getBotPlayersUnderYourCommand() {
@@ -319,38 +464,41 @@ public class BotCommandsPanel extends JPanel {
     }
 
     /**
-     * Builds a button's popup and shows it, logging the reason instead of silently doing nothing if the build throws or
-     * the popup ends up empty. Popups are built lazily on click, so an exception there is otherwise lost on the AWT
-     * event thread and leaves the button looking dead (e.g. clicking it does nothing).
+     * Builds a button's popup and shows it, logging the reason if the build throws. Popups are built lazily on click,
+     * so an exception there is otherwise lost on the AWT event thread and leaves the button looking dead.
      *
      * @param button       The button the popup is anchored to
      * @param popupFactory Supplies the popup to display
      */
     private void showButtonPopup(MegaMekButton button, Supplier<JPopupMenu> popupFactory) {
+        showButtonPopup(button, popupFactory, "BotCommandPanel.emptyPopup.nothingToOffer");
+    }
+
+    /**
+     * Builds a button's popup and shows it. When the popup ends up empty it is shown anyway, holding one grayed-out
+     * line that says why, so the button never looks dead: the Commander window MekHQ's auto-resolve uses has no board
+     * to show a toast on, and an all-aerospace force left Move Order and Quick Orders doing nothing at all on a click
+     * (issue #10836).
+     *
+     * @param button          The button the popup is anchored to
+     * @param popupFactory    Supplies the popup to display
+     * @param emptyMessageKey The resource key of the line explaining an empty popup when the player does command bots
+     */
+    private void showButtonPopup(MegaMekButton button, Supplier<JPopupMenu> popupFactory, String emptyMessageKey) {
         try {
             JPopupMenu popup = popupFactory.get();
             if (popup.getComponentCount() == 0) {
-                LOGGER.info("[BotPanel] {} popup has no entries to show (no commandable bots or applicable options)",
-                      button.getText());
-                return;
+                String messageKey = getBotPlayersUnderYourCommand().isEmpty()
+                      ? "BotCommandPanel.emptyPopup.noBots" : emptyMessageKey;
+                LOGGER.info("[BotPanel] {} popup has no entries to show ({})", button.getText(), messageKey);
+                JMenuItem explanation = new JMenuItem(Messages.getString(messageKey));
+                explanation.setEnabled(false);
+                popup.add(explanation);
             }
             popup.show(button, 0, button.getHeight());
         } catch (Exception exception) {
             LOGGER.error(exception, "[BotPanel] Failed to build the {} popup", button.getText());
         }
-    }
-
-    /**
-     * Sets the panel background to the top menu bar color so the docked strip blends with the bar above it. Falls back
-     * to the generic control color when the theme does not define a menu bar background.
-     */
-    private void applyTopBarBackground() {
-        Color barBackground = UIManager.getColor("MenuBar.background");
-        if (barBackground == null) {
-            barBackground = UIManager.getColor("control");
-        }
-        setOpaque(true);
-        setBackground(barBackground);
     }
 
     private JPopupMenu createSelectBehaviorPopup() {
@@ -381,36 +529,73 @@ public class BotCommandsPanel extends JPanel {
         sendChatCommand(botPlayer, ChatCommands.SHOW_DISHONORED);
     }
 
-    private JPopupMenu createRetreatPopup() {
+    /**
+     * The Move Order editor for each bot: pick all its units or a lance here, then set their route, each waypoint's
+     * facing and hold, and their formation in one window. One unit or a mix is picked in the editor.
+     */
+    private JPopupMenu createMoveOrderPopup() {
         return createBotFirstPopup((botMenu, botPlayer) -> {
-            addRetreatAction(botMenu, botPlayer, CardinalEdge.NORTH, this::retreatNorth);
-            addRetreatAction(botMenu, botPlayer, CardinalEdge.EAST, this::retreatEast);
-            addRetreatAction(botMenu, botPlayer, CardinalEdge.SOUTH, this::retreatSouth);
-            addRetreatAction(botMenu, botPlayer, CardinalEdge.WEST, this::retreatWest);
-            addRetreatAction(botMenu, botPlayer, CardinalEdge.NEAREST, this::retreatNearestEdge);
-            addRetreatAction(botMenu, botPlayer, CardinalEdge.NONE, this::noRetreat);
-            botMenu.addSeparator();
-            addBotAction(botMenu, botPlayer, "HoldPosition", this::holdPosition);
-            addBotAction(botMenu, botPlayer, "ResumeMovement", this::resumeMovement);
-            // Shoot-and-scoot only moves on-board artillery; gray it out for a bot whose artillery is all off-board
-            // (off-board units cannot move). Evaluated per bot, since a player may command a mix of on- and off-board
-            // artillery bots.
-            boolean canScoot = hasMovableArtillery(botPlayer);
-            JMenuItem shootAndScootItem = addBotAction(botMenu, botPlayer, "ShootAndScoot", this::enableShootAndScoot);
-            JMenuItem stopShootAndScootItem = addBotAction(botMenu, botPlayer, "StopShootAndScoot",
-                  this::disableShootAndScoot);
-            JMenuItem scootToHexItem = new JMenuItem(Messages.getString("BotCommandPanel.ScootToHex.title"));
-            scootToHexItem.setToolTipText(Messages.getString("BotCommandPanel.ScootToHex.tooltip"));
-            scootToHexItem.addActionListener(evt -> scootToHex(botPlayer));
-            botMenu.add(scootToHexItem);
-            if (!canScoot) {
-                String reason = Messages.getString("BotCommandPanel.ShootAndScoot.noOnBoardArtillery");
-                for (JMenuItem item : List.of(shootAndScootItem, stopShootAndScootItem, scootToHexItem)) {
-                    item.setEnabled(false);
-                    item.setToolTipText(reason);
-                }
+            if (clientGUI == null) {
+                // no board to click in this GUI: the orders menu, where routes are typed as hex numbers
+                ordersMenuBuilder.populate(botMenu, botPlayer, null);
+                return;
             }
-        }, this::hasOnBoardUnits);
+            for (BotOrdersMenuBuilder.OrderGroup group : ordersMenuBuilder.lanceGroupsFor(botPlayer)) {
+                JMenuItem groupItem = new JMenuItem(group.label());
+                groupItem.addActionListener(event -> openMoveOrder(botPlayer, group));
+                botMenu.add(groupItem);
+            }
+        }, MOVE_ORDER_SCROLL_THRESHOLD, this::takesUnitOrders);
+    }
+
+    /**
+     * The one-click orders for each bot's units: pause, resume, stop, hold position, edges, priority and formation off.
+     */
+    private JPopupMenu createQuickOrdersPopup() {
+        return createBotFirstPopup((botMenu, botPlayer) -> ordersMenuBuilder.populateQuick(botMenu, botPlayer),
+              this::takesUnitOrders);
+    }
+
+    /**
+     * Opens the Move Order editor for a group, on the board its first unit is on.
+     */
+    private void openMoveOrder(Player botPlayer, BotOrdersMenuBuilder.OrderGroup group) {
+        if ((clientGUI == null) || group.unitIds().isEmpty()) {
+            return;
+        }
+        Entity firstUnit = client.getGame().getInGameObject(group.unitIds().get(0))
+              .filter(Entity.class::isInstance).map(Entity.class::cast).orElse(null);
+        BoardView boardView = (firstUnit != null) && (clientGUI.getBoardView(firstUnit.getBoardId())
+              instanceof BoardView unitBoardView) ? unitBoardView : null;
+        if (boardView == null) {
+            clientGUI.addToast(ToastLevel.WARNING, Messages.getString("BotCommandPanel.MoveOrder.noBoard"));
+            return;
+        }
+        new BotMoveOrderDialog(clientGUI, boardView, botPlayer, group,
+              () -> ordersMenuBuilder.unitsByLance(botPlayer), this::acknowledgeOrder).setVisible(true);
+    }
+
+    /**
+     * Adds the shoot-and-scoot orders to a bot's artillery menu. Shoot-and-scoot only moves on-board artillery, so the
+     * items are grayed out for a bot whose artillery is all off-board (off-board units cannot move). Evaluated per
+     * bot, since a player may command a mix of on- and off-board artillery bots.
+     */
+    private void addShootAndScootActions(JMenu botMenu, Player botPlayer) {
+        boolean canScoot = hasMovableArtillery(botPlayer);
+        JMenuItem shootAndScootItem = addBotAction(botMenu, botPlayer, "ShootAndScoot", this::enableShootAndScoot);
+        JMenuItem stopShootAndScootItem = addBotAction(botMenu, botPlayer, "StopShootAndScoot",
+              this::disableShootAndScoot);
+        JMenuItem scootToHexItem = new JMenuItem(Messages.getString("BotCommandPanel.ScootToHex.title"));
+        scootToHexItem.setToolTipText(Messages.getString("BotCommandPanel.ScootToHex.tooltip"));
+        scootToHexItem.addActionListener(event -> scootToHex(botPlayer));
+        botMenu.add(scootToHexItem);
+        if (!canScoot) {
+            String reason = Messages.getString("BotCommandPanel.ShootAndScoot.noOnBoardArtillery");
+            for (JMenuItem item : List.of(shootAndScootItem, stopShootAndScootItem, scootToHexItem)) {
+                item.setEnabled(false);
+                item.setToolTipText(reason);
+            }
+        }
     }
 
     /**
@@ -425,6 +610,40 @@ public class BotCommandsPanel extends JPanel {
             }
         }
         return false;
+    }
+
+    /**
+     * @param botPlayer The bot to inspect
+     *
+     * @return {@code true} if the bot is a CASPAR bot, the only kind that follows unit orders, with at least one
+     *       on-board unit to give them to
+     */
+    private boolean takesUnitOrders(Player botPlayer) {
+        return (client.getGame() instanceof Game game) && OrderEligibility.takesUnitOrders(game, botPlayer)
+              && hasOnBoardUnits(botPlayer);
+    }
+
+    /**
+     * @return {@code true} if any bot under the player's command takes unit orders
+     */
+    private boolean anyBotTakesUnitOrders() {
+        for (Player botPlayer : getBotPlayersUnderYourCommand()) {
+            if (takesUnitOrders(botPlayer)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Tells the player that unit orders are for CASPAR bots only, when none of the bots they command is one.
+     */
+    private void showCasparOnlyNotice() {
+        String notice = Messages.getString("BotCommandPanel.Orders.casparOnly");
+        LOGGER.info("[BotOrders] {}", notice);
+        if (clientGUI != null) {
+            clientGUI.addToast(ToastLevel.INFO, notice);
+        }
     }
 
     /**
@@ -457,14 +676,6 @@ public class BotCommandsPanel extends JPanel {
         return false;
     }
 
-    private void holdPosition(Player botPlayer) {
-        sendChatCommand(botPlayer, ChatCommands.HOLD_POSITION);
-    }
-
-    private void resumeMovement(Player botPlayer) {
-        sendChatCommand(botPlayer, ChatCommands.HOLD_POSITION, "false");
-    }
-
     private void enableShootAndScoot(Player botPlayer) {
         sendChatCommand(botPlayer, ChatCommands.SHOOT_AND_SCOOT);
     }
@@ -486,6 +697,8 @@ public class BotCommandsPanel extends JPanel {
 
     private JPopupMenu createManeuverPopup() {
         return createBotFirstPopup((botMenu, botPlayer) -> {
+            botMenu.add(createPostureMenu(botPlayer));
+            botMenu.addSeparator();
             addBotAction(botMenu, botPlayer, "AlphaStrike", this::alphaStrikeManeuver);
             addBotAction(botMenu, botPlayer, "NoPrisoners", this::noPrisonersManeuver);
             addBotAction(botMenu, botPlayer, "StayAtRange", this::stayAtRangeManeuver);
@@ -504,6 +717,28 @@ public class BotCommandsPanel extends JPanel {
     }
 
     /**
+     * Creates the combat posture menu for one bot: Attack, Defend, or Auto.
+     *
+     * @param botPlayer The bot the posture will be applied to
+     *
+     * @return The created menu
+     */
+    private JMenu createPostureMenu(Player botPlayer) {
+        JMenu menu = new JMenu(Messages.getString("BotCommandPanel.Posture.title"));
+        menu.setToolTipText(Messages.getString("BotCommandPanel.Posture.tooltip"));
+        for (CombatPosture posture : CombatPosture.values()) {
+            JMenuItem postureItem = new JMenuItem(posture.toString());
+            postureItem.setToolTipText(Messages.getString("BotCommandPanel.Posture." + posture.name() + ".tooltip"));
+            postureItem.addActionListener(event -> {
+                sendChatCommand(botPlayer, ChatCommands.POSTURE, posture.name());
+                acknowledgeOrder(botPlayer, Messages.getString("BotCommandPanel.toast.posture", posture));
+            });
+            menu.add(postureItem);
+        }
+        return menu;
+    }
+
+    /**
      * Creates the fine-tuning menu for one bot, which exposes the five behavior dials the maneuver presets are built
      * from so each can be set directly.
      *
@@ -517,7 +752,7 @@ public class BotCommandsPanel extends JPanel {
         menu.add(createBehaviorDialMenu(botPlayer, "Bot.commands.caution", ChatCommands.CAUTION));
         menu.add(createBehaviorDialMenu(botPlayer, "Bot.commands.avoid", ChatCommands.AVOID));
         menu.add(createBehaviorDialMenu(botPlayer, "Bot.commands.aggression", ChatCommands.AGGRESSION));
-        menu.add(createBehaviorDialMenu(botPlayer, "Bot.commands.herding", ChatCommands.HERDING));
+        menu.add(createBehaviorDialMenu(botPlayer, "Bot.commands.mutualSupport", ChatCommands.MUTUAL_SUPPORT));
         menu.add(createBehaviorDialMenu(botPlayer, "Bot.commands.bravery", ChatCommands.BRAVERY));
         return menu;
     }
@@ -645,24 +880,6 @@ public class BotCommandsPanel extends JPanel {
         return menuItem;
     }
 
-    /**
-     * Adds a retreat-edge action item to a bot's submenu.
-     *
-     * @param botMenu      The bot submenu to add the item to
-     * @param botPlayer    The bot the retreat order will be issued to
-     * @param cardinalEdge The edge to retreat toward
-     * @param action       The action to run against the bot
-     */
-    private void addRetreatAction(JMenu botMenu, Player botPlayer, CardinalEdge cardinalEdge,
-          Consumer<Player> action) {
-        JMenuItem menuItem = new JMenuItem(cardinalEdge.toString());
-        menuItem.addActionListener(evt -> {
-            action.accept(botPlayer);
-            acknowledgeOrder(botPlayer, Messages.getString("BotCommandPanel.toast.retreat", cardinalEdge));
-        });
-        botMenu.add(menuItem);
-    }
-
     private void carefulAimManeuver(Player botPlayer) {
         setAvoid(botPlayer, 6);
         setBravery(botPlayer, 8);
@@ -733,7 +950,7 @@ public class BotCommandsPanel extends JPanel {
     }
 
     private void setHerdMentality(Player botPlayer, int value) {
-        sendChatCommand(botPlayer, ChatCommands.HERDING, value);
+        sendChatCommand(botPlayer, ChatCommands.MUTUAL_SUPPORT, value);
     }
 
     private void setBravery(Player botPlayer, int value) {
@@ -774,14 +991,80 @@ public class BotCommandsPanel extends JPanel {
         sendChatCommand(botPlayer, ChatCommands.CLEAR_IGNORED_TARGETS);
     }
 
-    private JPopupMenu createPriorityTargetPopup() {
+    /**
+     * What each bot shoots at first and what it leaves alone: priority, TAG and strategic targets and blood feuds,
+     * then ignored units and players. Priority and ignore orders share one menu to leave room on the panel.
+     */
+    private JPopupMenu createTargetsPopup() {
         return createBotFirstPopup((botMenu, botPlayer) -> {
-            addEnemyUnitMenu(botMenu, botPlayer, "PriorityTargetMenu", this::setPriorityTarget);
+            addPriorityTargetItem(botMenu, botPlayer);
             addEnemyUnitMenu(botMenu, botPlayer, "TagTargetMenu", this::setTagTarget);
             addStrategicTargetItem(botMenu, botPlayer);
             addEnemyPlayerMenu(botMenu, botPlayer, "BloodFeud", ChatCommands.BLOOD_FEUD,
                   "BotCommandPanel.toast.bloodFeud");
+            botMenu.addSeparator();
+            addEnemyUnitMenu(botMenu, botPlayer, "IgnoreTargetMenu", this::setIgnoreTarget);
+            addEnemyPlayerMenu(botMenu, botPlayer, "IgnorePlayer", ChatCommands.IGNORE_PLAYER,
+                  "BotCommandPanel.toast.ignorePlayer");
+            addBotAction(botMenu, botPlayer, "IgnoreTurrets", this::ignoreTurrets);
+            addBotAction(botMenu, botPlayer, "ClearIgnoredTargets", this::clearIgnoredTargetsOrder);
         });
+    }
+
+    /**
+     * Adds the item that opens the priority target picker for a bot. Without a client window to open it from, falls
+     * back to the plain list of enemy units, which adds a target at the default priority.
+     *
+     * @param botMenu   the bot submenu to add the item to
+     * @param botPlayer the bot the orders go to
+     */
+    private void addPriorityTargetItem(JMenu botMenu, Player botPlayer) {
+        if (clientGUI == null) {
+            addEnemyUnitMenu(botMenu, botPlayer, "PriorityTargetMenu", this::setPriorityTarget);
+            return;
+        }
+        JMenuItem pickerItem = new JMenuItem(Messages.getString("BotCommandPanel.PriorityTargetPicker.title"));
+        pickerItem.setToolTipText(Messages.getString("BotCommandPanel.PriorityTargetPicker.tooltip"));
+        pickerItem.addActionListener(event -> pickPriorityTargets(botPlayer));
+        botMenu.add(pickerItem);
+    }
+
+    /**
+     * Opens the priority target picker for a running bot and sends one priority order for each unit that is new or
+     * whose target priority changed. Units already on the bot list cannot be unticked here, since the bot takes no
+     * order to drop one.
+     *
+     * @param botPlayer the bot the orders go to
+     */
+    private void pickPriorityTargets(Player botPlayer) {
+        Game game = clientGUI.getClient().getGame();
+        Map<Integer, Integer> currentPriorities = new HashMap<>();
+        // the server sends every bot's settings when a client connects; before that the map can still be missing
+        Map<String, BehaviorSettings> allBotSettings = game.getBotSettings();
+        BehaviorSettings knownSettings = (allBotSettings == null) ? null : allBotSettings.get(botPlayer.getName());
+        if (knownSettings != null) {
+            for (int unitId : knownSettings.getPriorityUnitTargets()) {
+                currentPriorities.put(unitId, knownSettings.getTargetPriority(unitId));
+            }
+        }
+        var picker = new BotTargetPickerDialog(clientGUI.getFrame(), game, botPlayer,
+              currentPriorities, currentPriorities.keySet());
+        picker.setVisible(true);
+        if (picker.getResult() != DialogResult.CONFIRMED) {
+            return;
+        }
+        int ordersSent = 0;
+        for (Map.Entry<Integer, Integer> picked : picker.getPickedPriorities().entrySet()) {
+            boolean isUnchanged = picked.getValue().equals(currentPriorities.get(picked.getKey()));
+            if (!isUnchanged) {
+                sendChatCommand(botPlayer, ChatCommands.PRIORITIZE, picked.getKey() + " " + picked.getValue());
+                ordersSent++;
+            }
+        }
+        LOGGER.debug("[PriorityTargets] sent {} priority target order(s) to {}", ordersSent, botPlayer.getName());
+        if (ordersSent > 0) {
+            acknowledgeOrder(botPlayer, Messages.getString("BotCommandPanel.toast.priorityTargets", ordersSent));
+        }
     }
 
     private void setTagTarget(PlayerInGameObject playerInGameObject) {
@@ -824,16 +1107,6 @@ public class BotCommandsPanel extends JPanel {
                   acknowledgeOrder(botPlayer,
                         Messages.getString("BotCommandPanel.toast.strategicTarget", targets));
               });
-    }
-
-    private JPopupMenu createIgnoreTargetPopup() {
-        return createBotFirstPopup((botMenu, botPlayer) -> {
-            addEnemyUnitMenu(botMenu, botPlayer, "IgnoreTargetMenu", this::setIgnoreTarget);
-            addEnemyPlayerMenu(botMenu, botPlayer, "IgnorePlayer", ChatCommands.IGNORE_PLAYER,
-                  "BotCommandPanel.toast.ignorePlayer");
-            addBotAction(botMenu, botPlayer, "IgnoreTurrets", this::ignoreTurrets);
-            addBotAction(botMenu, botPlayer, "ClearIgnoredTargets", this::clearIgnoredTargetsOrder);
-        });
     }
 
     /**
@@ -886,6 +1159,8 @@ public class BotCommandsPanel extends JPanel {
             botMenu.add(createArtilleryFireMissionMenu(botPlayer, "ArtilleryVolley", ArtilleryOrder.VOLLEY));
             botMenu.add(createArtilleryFireMissionMenu(botPlayer, "ArtilleryBarrage", ArtilleryOrder.BARRAGE));
             botMenu.add(createCounterBatteryMenu(botPlayer));
+            botMenu.addSeparator();
+            addShootAndScootActions(botMenu, botPlayer);
         }, this::botHasArtillery);
     }
 
@@ -1260,23 +1535,6 @@ public class BotCommandsPanel extends JPanel {
         return targets.replace("-", ", ");
     }
 
-    private JPopupMenu createWaypointsPopup() {
-        return createBotFirstPopup((botMenu, botPlayer) -> {
-            if (!getUnitsOwnedBy(botPlayer).isEmpty()) {
-                botMenu.add(createWaypointHexOrderMenu(botPlayer, "SetWaypoints", ChatCommands.SET_WAYPOINT));
-                botMenu.add(createWaypointHexOrderMenu(botPlayer, "AddWaypoint", ChatCommands.ADD_WAYPOINT));
-                botMenu.addSeparator();
-                botMenu.add(createWaypointUnitOrderMenu(botPlayer, "RemoveWaypoint", ChatCommands.REMOVE_WAYPOINT));
-                botMenu.add(createWaypointUnitOrderMenu(botPlayer, "ClearWaypoints", ChatCommands.CLEAR_WAYPOINT));
-            }
-            addBotAction(botMenu, botPlayer, "ClearAllWaypoints", this::clearAllWaypoints);
-        }, this::hasOnBoardUnits);
-    }
-
-    private void clearAllWaypoints(Player botPlayer) {
-        sendChatCommand(botPlayer, ChatCommands.CLEAR_ALL_WAYPOINTS);
-    }
-
     /**
      * Lists all units owned by the given bot player.
      *
@@ -1288,78 +1546,6 @@ public class BotCommandsPanel extends JPanel {
         return client.getInGameObjects().stream()
               .filter(unit -> unit.getOwnerId() == botPlayer.getId())
               .toList();
-    }
-
-    /**
-     * Creates a waypoint menu for one bot that needs target hexes: pick one of the bot's units, then enter the hexes.
-     *
-     * @param botPlayer       The bot the waypoint order will be issued to
-     * @param messageKey      The resource key for the menu title and tooltip
-     * @param waypointCommand The waypoint chat command to send (set-waypoints or add-waypoint)
-     *
-     * @return The created menu
-     */
-    private JMenu createWaypointHexOrderMenu(Player botPlayer, String messageKey, ChatCommands waypointCommand) {
-        return createWaypointMenu(botPlayer, messageKey, (bot, unit) ->
-              promptAndSendWaypoints(bot, unit, waypointCommand,
-                    Messages.getString("BotCommandPanel." + messageKey + ".title")));
-    }
-
-    /**
-     * Creates a waypoint menu for one bot that acts on a unit without needing hexes (remove last / clear waypoints).
-     *
-     * @param botPlayer       The bot the waypoint order will be issued to
-     * @param messageKey      The resource key for the menu title and tooltip
-     * @param waypointCommand The waypoint chat command to send (remove-waypoint or clear-waypoints)
-     *
-     * @return The created menu
-     */
-    private JMenu createWaypointUnitOrderMenu(Player botPlayer, String messageKey, ChatCommands waypointCommand) {
-        return createWaypointMenu(botPlayer, messageKey, (bot, unit) -> {
-            sendChatCommand(bot, waypointCommand, String.valueOf(unit.getId()));
-            acknowledgeOrder(bot, Messages.getString("BotCommandPanel.toast.unitOrder",
-                  Messages.getString("BotCommandPanel." + messageKey + ".title"),
-                  unit.getId(), unit.generalName()));
-        });
-    }
-
-    /**
-     * Creates a menu listing one bot's units; selecting a unit runs the given action.
-     *
-     * @param botPlayer  The bot whose units are listed
-     * @param messageKey The resource key for the menu title and tooltip
-     * @param unitAction The action to run with the bot and the chosen unit
-     *
-     * @return The created menu
-     */
-    private JMenu createWaypointMenu(Player botPlayer, String messageKey, BiConsumer<Player, InGameObject> unitAction) {
-        JMenu menu = new JMenu(Messages.getString("BotCommandPanel." + messageKey + ".title"));
-        menu.setToolTipText(Messages.getString("BotCommandPanel." + messageKey + ".tooltip"));
-        for (InGameObject unit : getUnitsOwnedBy(botPlayer)) {
-            JMenuItem unitItem = new JMenuItem("ID:" + unit.getId() + " " + unit.generalName());
-            unitItem.addActionListener(evt -> unitAction.accept(botPlayer, unit));
-            menu.add(unitItem);
-        }
-        return menu;
-    }
-
-    /**
-     * Prompts the player for waypoint hexes and sends the given waypoint command for the chosen unit.
-     *
-     * @param botPlayer       The bot to receive the order
-     * @param unit            The unit to set waypoints for
-     * @param waypointCommand The waypoint chat command to send
-     * @param orderTitle      The human-readable order name for the confirmation toast
-     */
-    private void promptAndSendWaypoints(Player botPlayer, InGameObject unit, ChatCommands waypointCommand,
-          String orderTitle) {
-        pickTargetHexes(orderTitle + " - " + unit.generalName(), false, 0,
-              "BotCommandPanel.WaypointPrompt.message",
-              targets -> {
-                  sendChatCommand(botPlayer, waypointCommand, unit.getId() + " " + targets);
-                  acknowledgeOrder(botPlayer, Messages.getString("BotCommandPanel.toast.unitOrder",
-                        orderTitle, unit.getId(), unit.generalName()));
-              });
     }
 
     private record PlayerInGameObject(Player player, InGameObject inGameObject) {}
@@ -1414,34 +1600,6 @@ public class BotCommandsPanel extends JPanel {
                     playerInGameObject.inGameObject().generalName()));
     }
 
-    private void retreatNorth(Player botPlayer) {
-        retreatTowards(botPlayer, CardinalEdge.NORTH);
-    }
-
-    private void retreatEast(Player botPlayer) {
-        retreatTowards(botPlayer, CardinalEdge.EAST);
-    }
-
-    private void retreatWest(Player botPlayer) {
-        retreatTowards(botPlayer, CardinalEdge.WEST);
-    }
-
-    private void retreatSouth(Player botPlayer) {
-        retreatTowards(botPlayer, CardinalEdge.SOUTH);
-    }
-
-    private void retreatNearestEdge(Player botPlayer) {
-        retreatTowards(botPlayer, CardinalEdge.NEAREST);
-    }
-
-    private void noRetreat(Player botPlayer) {
-        retreatTowards(botPlayer, CardinalEdge.NONE);
-    }
-
-    private void retreatTowards(Player botPlayer, CardinalEdge cardinalEdge) {
-        sendChatCommand(botPlayer, ChatCommands.FLEE, cardinalEdge.getIndex());
-    }
-
     private void pauseUnpause() {
         if (pauseLatch) {
             client.sendUnpause();
@@ -1460,7 +1618,22 @@ public class BotCommandsPanel extends JPanel {
     }
 
     private boolean canBePaused() {
-        var game = client.getGame();
+        return isGamePausable(client.getGame());
+    }
+
+    /**
+     * Pausing is only meaningful while a bot-only game is still being watched. It is refused once the game has been
+     * decided - at victory, pausing would only freeze the server waiting to be unpaused and block the hand-off back to
+     * MekHQ (issue #8888) - and whenever a human player still owns units.
+     *
+     * @param game the game to test
+     *
+     * @return {@code true} if the game may be paused right now
+     */
+    static boolean isGamePausable(IGame game) {
+        if (game.getPhase().isVictory()) {
+            return false;
+        }
         List<Player> nonBots = game.getPlayersList().stream().filter(p -> !p.isBot()).toList();
         boolean liveUnitsRemaining = nonBots.stream().anyMatch(p -> game.getEntitiesOwnedBy(p) > 0);
         return !liveUnitsRemaining;

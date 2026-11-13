@@ -39,13 +39,13 @@ import static java.lang.Math.floor;
 import java.io.Serial;
 import java.util.Vector;
 
-import megamek.common.HitData;
 import megamek.common.RangeType;
 import megamek.common.Report;
 import megamek.common.ToHitData;
 import megamek.common.actions.WeaponAttackAction;
 import megamek.common.battleArmor.BattleArmor;
 import megamek.common.compute.Compute;
+import megamek.common.enums.HitDamageType;
 import megamek.common.equipment.WeaponType;
 import megamek.common.game.Game;
 import megamek.common.loaders.EntityLoadingException;
@@ -65,7 +65,7 @@ public class EnergyWeaponHandler extends WeaponHandler {
     public EnergyWeaponHandler(ToHitData toHit, WeaponAttackAction waa, Game g, TWGameManager m)
           throws EntityLoadingException {
         super(toHit, waa, g, m);
-        generalDamageType = HitData.DAMAGE_ENERGY;
+        generalDamageType = HitDamageType.DAMAGE_ENERGY;
     }
 
     /**
@@ -131,11 +131,11 @@ public class EnergyWeaponHandler extends WeaponHandler {
         // Apply Gothic Dazzle Mode damage reduction
         if (weapon.curMode().getName().contains("Dazzle")) {
             // TODO: Check if target is Abomination when that system is implemented
-            // For now, assume all targets are BattleMechs (not Abominations)
+            // For now, assume all targets are BattleMeks (not Abominations)
             boolean isAbomination = false; // Stub for future implementation
 
             if (!isAbomination) {
-                // Half damage vs BattleMechs (rounded down, min 1)
+                // Half damage vs BattleMeks (rounded down, min 1)
                 toReturn = Math.max(1, toReturn / 2);
             }
             // Full damage vs Abominations (no change to toReturn)
@@ -169,8 +169,8 @@ public class EnergyWeaponHandler extends WeaponHandler {
 
         if (target.isConventionalInfantry()) {
             toReturn = Compute.directBlowInfantryDamage(
-                  toReturn, bDirect ? toHit.getMoS() / 3 : 0,
-                  weaponType.getInfantryDamageClass(),
+                  toReturn, getInfantryDamageClassShift(),
+                  resolveInfantryDamageClass(weaponType.getInfantryDamageClass()),
                   ((Infantry) target).isMechanized(),
                   toHit.getThruBldg() != null, attackingEntity.getId(), calcDmgPerHitReport);
         } else if (bDirect) {

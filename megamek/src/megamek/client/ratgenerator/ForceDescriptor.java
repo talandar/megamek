@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2016-2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -35,8 +35,8 @@ package megamek.client.ratgenerator;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import jakarta.annotation.Nullable;
 import megamek.client.ratgenerator.Ruleset.ProgressListener;
-import megamek.common.annotations.Nullable;
 import megamek.common.compute.Compute;
 import megamek.common.loaders.EntityLoadingException;
 import megamek.common.loaders.MekFileParser;
@@ -59,9 +59,21 @@ public class ForceDescriptor {
     public static final int REINFORCED = 1;
     public static final int UNDERSTRENGTH = -1;
 
+    /**
+     * The {@code generate} rules that ask for one unit across a whole {@code <subforces>} block rather
+     * than a unit chosen for each child, which is what makes a matched pair or a uniform company.
+     */
+    private static final Set<String> SHARED_UNIT_RULES = Set.of("model", "chassis");
+
     public static final int EXP_GREEN = 0;
     public static final int EXP_REGULAR = 1;
     public static final int EXP_VETERAN = 2;
+    /**
+     * Elite. Declared for completeness: the value was already produced by the Experience Target picker
+     * and indexed the elite row of the skill tables, but had no constant, so the range these values
+     * cover could only be discovered by reading {@link CrewDescriptor}'s tables.
+     */
+    public static final int EXP_ELITE = 3;
 
     // Mapped to Dragoon Rating in MHQ
     public static final int RATING_0 = 0;
@@ -89,6 +101,19 @@ public class ForceDescriptor {
     public static final String[] ROMAN = { "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII",
                                            "XIII", "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX" };
 
+    /**
+     * Echelons for the naval hierarchy, nesting Flotilla &lt; Division &lt; Squadron &lt; Fleet under a
+     * ship-type category. They deliberately sit above the ground echelons a combat force uses, so a
+     * naval formation is never mistaken for a ground one of the same depth - a Flotilla used to be
+     * declared at the Regiment echelon, which had it picked up by rules meant for ground regiments.
+     */
+    private static final int ECHELON_NAVAL_FLOTILLA = 5;
+    private static final int ECHELON_NAVAL_DIVISION = 6;
+    private static final int ECHELON_NAVAL_SQUADRON = 7;
+    private static final int ECHELON_NAVAL_FLEET = 8;
+    private static final int ECHELON_NAVAL_CATEGORY = 9;
+    private static final int ECHELON_NAVAL_ROOT = 10;
+
     private int index;
     /**
      * Unique id of this node within the generated force, assigned by {@link #assignForceIds(int)} and
@@ -109,6 +134,12 @@ public class ForceDescriptor {
     // WeightBudgetAllocator after the tree is built. Null means no budget for this node.
     private Map<Integer, WeightTarget> weightTargets;
     private final HashSet<EntityMovementMode> movementModes;
+    // The kind of conventional infantry the player asked for, in place of a weight class. Copied to children so every
+    // line platoon matches it; cleared on attached support, which keeps its own picks. Null means no restriction.
+    private InfantryClass infantryClass;
+    // For InfantryClass.BEAST: the one beast chassis the whole force rides, picked before the tree is built and copied
+    // to children alongside the class. Null when no beast was available or the class is not BEAST.
+    private String infantryClassChassis;
     private final HashSet<MissionRole> roles;
     private String rating;
     private Integer experience;
@@ -124,7 +155,22 @@ public class ForceDescriptor {
     private final HashSet<String> flags;
 
     private FormationType formationType;
+    // The formation types this node's rule actually offered, mapped to the weight the ruleset gave each. Recorded
+    // when the formation rule fires, before the weighted pick, so it describes the choice rather than its outcome.
+    // A node with one entry had no choice to make (a command lance, say); a node with none was never offered one.
+    private Map<String, Integer> eligibleFormations = Map.of();
+    // The requested distribution of formation types, set on the root from the Force Generator's controls. Empty means
+    // no override, which reproduces generation exactly as it was before the mix existed. Deliberately not copied to
+    // children: the allocator reads it once from the root and works down from there.
+    private FormationMix formationMix = FormationMix.EMPTY;
+    // What the mix actually achieved, set on the root by the allocator. Null when no mix was applied.
+    private FormationMixReport formationMixReport;
     private String generationRule;
+    // The generate rule of the <subforces> block that created this node, set only by that block. Kept apart from
+    // generationRule, which a node also takes from its own children's block when its parent's block declared none:
+    // reading that one, a Clan Star mistook its Points' "model" rule for its own and shared one model across all its
+    // Points, so a Point's two units could each hold two different models and come out mismatched.
+    private String blockGenerationRule;
     private boolean topLevel;
     private boolean element;
     private int positionIndex;
@@ -140,8 +186,31 @@ public class ForceDescriptor {
     private double dropshipPct = 0.0;
     private double jumpshipPct = 0.0;
     private double warshipPct = 0.0;
-    private double cargo = 0.0;
+    /** What the force already owns to carry it before this run; only the shortfall is generated. */
+    private ExistingLift existingLift = ExistingLift.NONE;
+    /** Whether repeat units are made less likely while this force is generated; see {@link UnitVariety}. */
+    private boolean unitVarietyBias = false;
+    /** The model names of units earlier rolls of the same command already brought, for {@link UnitVariety}. */
+    private List<String> earlierUnits = List.of();
+    /**
+     * Models a pick for this slot should avoid if its chassis offers any other: the variants a lance already holds,
+     * while {@link UnitVariety} is in force. Set only for the length of one pick.
+     */
+    private final Set<String> excludedModels = new HashSet<>();
+    /** Whether this node is the "Naval Units" branch the transport stage attaches to a force. */
+    private boolean transportRoot = false;
+    /**
+     * How much of the command's cargo requirement to provision hauling for, as a percentage.
+     * 100 covers everything it has to carry; above 100 buys headroom for cargo picked up later.
+     * The ships themselves are generated by the consumer once the force exists and its real cargo
+     * load is known, so this is carried through generation rather than acted on during it.
+     */
+    private double cargoPct = 100.0;
     private boolean fighterComplement = false;
+
+    // Preview-time flag (not persisted): hosts such as MekHQ let the user exclude nodes from the
+    // generated force in the preview tree. Defaults to included; see setIncludedRecursively.
+    private boolean included = true;
 
     public ForceDescriptor() {
         faction = FactionRecord.IS_GENERAL_KEY;
@@ -201,9 +270,28 @@ public class ForceDescriptor {
      * Goes through the force tree structure and generates units for all leaf nodes.
      */
     public void generateUnits(ProgressListener l, double progress) {
+        // The outermost call of a generation decides whether repeat units are made less likely for all of it. The
+        // recursion below comes back through here with variety already in force, or already declined.
+        if (UnitVariety.active() == null) {
+            UnitVariety variety = UnitVariety.forGeneration(this);
+            if (variety != null) {
+                variety.runFor(this, () -> generateUnitsInScope(l, progress));
+                return;
+            }
+            generateUnitsInScope(l, progress);
+            if (getParent() == null) {
+                // Logged without variety too, so the two can be compared from the same log.
+                UnitVariety.logSummary(this, false);
+            }
+            return;
+        }
+        generateUnitsInScope(l, progress);
+    }
+
+    private void generateUnitsInScope(ProgressListener l, double progress) {
         // If the parent node has a chassis or model assigned, it carries through to the
         // children.
-        if (null != parent) {
+        if (parent != null) {
             chassis.addAll(parent.getChassis());
             models.addAll(parent.getModels());
         }
@@ -238,10 +326,10 @@ public class ForceDescriptor {
         // formation requirements, generate using default parameters.
         if (subForces.isEmpty()) {
             ModelRecord modelRecord = generate();
-            if (null == modelRecord && !models.isEmpty()) {
+            if (modelRecord == null && !models.isEmpty()) {
                 modelRecord = RATGenerator.getInstance().getModelRecord(getModelName());
             }
-            if (null != modelRecord) {
+            if (modelRecord != null) {
                 setUnit(modelRecord);
             } else if (models.isEmpty() && chassis.size() == 1) {
                 // Chassis-only element (e.g. a named WarShip referenced by chassis for a faction with
@@ -260,67 +348,48 @@ public class ForceDescriptor {
                       describeUnitType(unitType), faction, year, weightClass, roles, models, chassis);
             }
         } else {
-            if (null != formationType) {
-                // Simple leaf node (Lance, Star, etc.
-                if (null != generationRule) {
-                    // In cases like Novas and air lances the formation rules only apply to some of
-                    // the units
-                    if (!generateAndAssignFormation(subForces, generationRule.equals("chassis"), 0)) {
-                        generateLance(subForces);
-                        formationType = null;
-                    }
-                } else {
-                    // If group generation is not set, then either this is a compound formation (e.g. squadron,
-                    // aero/vehicle Point) or we are generating uniform sub forces such as companies in SL line units
-                    try {
-                        Map<String, List<ForceDescriptor>> byGenRule = subForces.stream()
-                              .collect(Collectors.groupingBy(
-                                    ForceDescriptor::getGenerationRule));
-                        if (byGenRule.containsKey("group")) {
-                            if (!generateAndAssignFormation(byGenRule.get("group")
-                                        .stream()
-                                        .map(ForceDescriptor::getSubForces)
-                                        .flatMap(Collection::stream)
-                                        .collect(Collectors.toList()),
-                                  false,
-                                  byGenRule.get("group").size())) {
-                                formationType = null;
-                            }
-                        } else if (byGenRule.containsKey("model")) {
-                            generateAndAssignFormation(byGenRule.get("model"), false, 0);
-                        } else if (byGenRule.containsKey("chassis")) {
-                            generateAndAssignFormation(byGenRule.get("chassis"), true, 0);
-                        }
-                    } catch (NullPointerException ex) {
-                        LOGGER.error(ex, "Found null generation rule in force node with formation set.");
-                    }
-                }
+            if (formationType != null) {
+                generateFormationByBlock();
             } else {
-                if (null != generationRule) {
-                    switch (generationRule) {
-                        case "chassis":
-                            if (getChassis().isEmpty()) {
-                                generate(generationRule);
-                            }
-                            break;
-                        case "model":
-                            if (getModels().isEmpty()) {
-                                generate(generationRule);
-                            }
-                            break;
-                        case "group":
-                            generateLance(subForces);
-                            break;
-                    }
+                // Each <subforces> block tagged the children it produced with its own generate rule,
+                // so a node holding several of them honours each in turn. A node with one block yields
+                // one group and behaves exactly as it did when the rule was read off the node itself.
+                Map<String, List<ForceDescriptor>> byBlockRule = subForces.stream()
+                                                                          .filter(sub -> sub.getBlockGenerationRule() != null)
+                      .collect(Collectors.groupingBy(ForceDescriptor::getBlockGenerationRule));
+                if (!byBlockRule.isEmpty()) {
+                    byBlockRule.forEach(this::generateByRule);
+                } else if (generationRule != null) {
+                    // No child carries a rule, so fall back to the node's own - an older shape, and
+                    // what an attached force still looks like.
+                    generateByRule(generationRule, subForces);
                 }
             }
         }
         int count = subForces.size() + attached.size();
         subForces.forEach(fd -> fd.generateUnits(l, progress / count));
         attached.forEach(fd -> fd.generateUnits(l, progress / count));
-        if (count == 0 && null != l) {
+        if (count == 0 && l != null) {
             l.updateProgress(progress, "Populating force tree");
         }
+    }
+
+    /**
+     * Whether every unit a formation picked is allowed by the infantry class of the slot it would fill.
+     *
+     * @param slots  the formation's slots, in the order the picks are assigned
+     * @param picked the units the formation builder chose, one per slot
+     *
+     * @return {@code true} when no slot would receive a unit of the wrong infantry class
+     */
+    private static boolean formationRespectsInfantryClass(List<ForceDescriptor> slots, List<ModelRecord> picked) {
+        int count = Math.min(slots.size(), picked.size());
+        for (int i = 0; i < count; i++) {
+            if (!slots.get(i).acceptsForInfantryClass(picked.get(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -341,8 +410,7 @@ public class ForceDescriptor {
      */
     private boolean generateAndAssignFormation(List<ForceDescriptor> subs, boolean chassis, int numGroups) {
         Map<Boolean, List<ForceDescriptor>> eligibleSubs = subs.stream()
-              .collect(Collectors.groupingBy(fd -> null !=
-                    fd.getUnitType() &&
+                                                               .collect(Collectors.groupingBy(fd -> fd.getUnitType() != null &&
                     (formationType.isAllowedUnitType(
                           fd.getUnitType())) ||
                     (augmented &&
@@ -361,6 +429,12 @@ public class ForceDescriptor {
                     list = generateFormation(eligibleSubs.get(true), ModelRecord.NETWORK_NONE, numGroups);
                 }
                 if (list.isEmpty()) {
+                    return false;
+                } else if (!formationRespectsInfantryClass(eligibleSubs.get(true), list)) {
+                    // The formation builder draws its own units and knows nothing of infantry classes. Rather than
+                    // field an off-class platoon, fall back to an ordinary lance, whose picks are held to the class.
+                    LOGGER.debug("[ForceGen][InfantryClass] '{}': {} picked units outside the requested infantry"
+                          + " class; generating as an ordinary lance", parseName(), formationType);
                     return false;
                 } else {
                     for (int i = 0; i < list.size(); i++) {
@@ -409,13 +483,21 @@ public class ForceDescriptor {
      *       the given parameters.
      */
     private List<ModelRecord> generateFormation(List<ForceDescriptor> subs, int networkMask, int numGroups) {
+        UnitVariety variety = UnitVariety.active();
+        // The formation builder draws this node's own units, so its draws are compared with this formation.
+        return (variety == null)
+              ? generateFormationUnits(subs, networkMask, numGroups)
+              : variety.inFormation(this, () -> generateFormationUnits(subs, networkMask, numGroups));
+    }
+
+    private List<ModelRecord> generateFormationUnits(List<ForceDescriptor> subs, int networkMask, int numGroups) {
         // Collect the weight classes the force tree assigned to this formation's elements. Passing
         // them to the formation builder keeps it within the lance's intended weight profile; left
         // null it would pick any weight the FormationType itself allows (e.g. a light Mek in a
         // Heavy/Assault Hunter lance).
         Set<Integer> formationWeightClasses = new TreeSet<>();
         for (ForceDescriptor sub : subs) {
-            if (sub.useWeightClass() && (null != sub.getWeightClass())
+            if (sub.useWeightClass() && (sub.getWeightClass() != null)
                   && (sub.getWeightClass() >= EntityWeightClass.WEIGHT_ULTRA_LIGHT)) {
                 formationWeightClasses.add(sub.getWeightClass());
             }
@@ -585,7 +667,7 @@ public class ForceDescriptor {
         if (!baseSubs.isEmpty()) {
             baseUnitList = generateFormation(baseSubs, networkMask, numGroups);
         }
-        if (null == baseUnitList) {
+        if (baseUnitList == null) {
             generateLance(baseSubs);
             baseUnitList = baseSubs.stream()
                   .map(ForceDescriptor::getModelName)
@@ -727,11 +809,12 @@ public class ForceDescriptor {
                         }
                         if (Compute.d6(2) >=
                               target - ((av == null) ? 0 : av.adjustForRating(ratingLevel, totalLevels))) {
+                            Set<String> chassisBeforeAttempt = new HashSet<>(sub.getChassis());
                             sub.getChassis().clear();
                             sub.getChassis().add(model);
                             int oldWt = sub.getWeightClass();
                             sub.setWeightClass(-1);
-                            unit = sub.generate();
+                            unit = generateVariantNotInLance(sub, subs);
                             if (unit != null && weights.contains(unit.getWeightClass())) {
                                 sub.setUnit(unit);
                                 if (useWeights) {
@@ -741,11 +824,17 @@ public class ForceDescriptor {
                                 break;
                             } else {
                                 sub.setWeightClass(oldWt);
+                                // Put the slot back as it was. Left pinned to the partner's chassis, a slot that
+                                // then fails every other pick becomes a chassis-only element: it loads whatever
+                                // that chassis name resolves to, or nothing, which shows as a blank entry.
+                                restoreChassis(sub, chassisBeforeAttempt);
                             }
                         }
                     } else {
                         ModelRecord mRec = RATGenerator.getInstance().getModelRecord(model);
+                        // Set directly rather than drawn from a table, so the infantry class is checked here
                         if (mRec != null &&
+                              sub.acceptsForInfantryClass(mRec) &&
                               weights.contains(mRec.getWeightClass()) &&
                               RATGenerator.getInstance().findModelAvailabilityRecord(era, model, faction, getYear())
                                     != null) {
@@ -788,15 +877,19 @@ public class ForceDescriptor {
                         }
                     }
                     if (Compute.d6(2) >= target - ((av == null) ? 0 : av.adjustForRating(ratingLevel, totalLevels))) {
+                        Set<String> chassisBeforeAttempt = new HashSet<>(sub.getChassis());
                         sub.getChassis().add(baseModel.getChassis());
                         sub.setWeightClass(-1);
-                        unit = sub.generate();
+                        unit = generateVariantNotInLance(sub, subs);
                         if (unit != null) {
                             sub.setUnit(unit);
                             if (useWeights) {
                                 weights.remove(sub.getWeightClass());
                             }
                             foundUnit = true;
+                        } else {
+                            // As above: a failed attempt must not leave the slot pinned to the base model's chassis.
+                            restoreChassis(sub, chassisBeforeAttempt);
                         }
                     } else if (ut == UnitType.TANK && Compute.d6(2) >= target - 6) {
                         if (useWeights) {
@@ -841,6 +934,54 @@ public class ForceDescriptor {
     }
 
     /**
+     * Puts a slot's chassis pins back as they were before an attempt that failed.
+     *
+     * @param slot                 the slot the attempt was made for
+     * @param chassisBeforeAttempt the slot's chassis pins before the attempt
+     */
+    private static void restoreChassis(ForceDescriptor slot, Set<String> chassisBeforeAttempt) {
+        slot.getChassis().clear();
+        slot.getChassis().addAll(chassisBeforeAttempt);
+    }
+
+    /**
+     * Picks a unit for a slot pinned to a lance-mate's chassis. While {@link UnitVariety} is in force the lance keeps
+     * the chassis - one logistics chain, one look - but takes a variant it does not already hold whenever the chassis
+     * offers one, so four tanks of a lance read as four Manticores rather than four identical ones. Without variety,
+     * or when the chassis has no other variant, this is an ordinary pick.
+     *
+     * @param slot  the slot, already pinned to the chassis
+     * @param lance every slot of the lance, to read the variants already chosen
+     *
+     * @return the unit, or {@code null} if none could be generated
+     *
+     * @author Illiani
+     * @since 0.51.01
+     */
+    private static @Nullable ModelRecord generateVariantNotInLance(ForceDescriptor slot, List<ForceDescriptor> lance) {
+        if (UnitVariety.active() == null) {
+            return slot.generate();
+        }
+        Set<String> variantsInLance = new HashSet<>();
+        for (ForceDescriptor other : lance) {
+            if ((other != slot) && other.isElement()) {
+                variantsInLance.addAll(other.getModels());
+            }
+        }
+        if (variantsInLance.isEmpty()) {
+            return slot.generate();
+        }
+        slot.excludedModels.addAll(variantsInLance);
+        ModelRecord otherVariant;
+        try {
+            otherVariant = slot.generate();
+        } finally {
+            slot.excludedModels.clear();
+        }
+        return (otherVariant != null) ? otherVariant : slot.generate();
+    }
+
+    /**
      * Assigns a specific model to this node of the force tree. If this is a leaf node it will be flagged as an element.
      * If it has child nodes, they will all be made up of the same model unless changed by a rule at a lower level of
      * organization.
@@ -857,9 +998,13 @@ public class ForceDescriptor {
         }
         if (subForces.isEmpty()) {
             element = true;
+            UnitVariety variety = UnitVariety.active();
+            if (variety != null) {
+                variety.record(this, unit);
+            }
             movementModes.clear();
             movementModes.add(unit.getMovementMode());
-            if (null == unitType) {
+            if (unitType == null) {
                 unitType = unit.getUnitType();
             }
             if (((unitType == UnitType.MEK) ||
@@ -882,6 +1027,153 @@ public class ForceDescriptor {
         }
     }
 
+    /**
+     * Generates a node that has been given a formation type, letting each {@code <subforces>} block
+     * that asked for a shared unit be built by its own rule.
+     *
+     * <p>A formation is by nature a set of different units chosen to work together, so its members are
+     * picked individually. A block asking for {@code model} or {@code chassis} is asking for the
+     * opposite - one unit across the block - and is therefore built separately and left out of the
+     * formation, which is what lets a Level II field a Mek formation and a matched fighter pair at
+     * once. Blocks asking for {@code group}, and blocks asking for nothing, are the formation.</p>
+     *
+     * <p>Where every block asks for a shared unit there is no formation left to build. That is a node
+     * whose single block carries the rule, which has always meant "build the formation and pin its
+     * pick to each child", so it goes on meaning that.</p>
+     */
+    private void generateFormationByBlock() {
+        FormationSplit split = splitForFormation(subForces);
+        if (split.formationMembers().isEmpty()) {
+            buildFormation(subForces, "chassis".equals(generationRule));
+            return;
+        }
+        split.sharedUnitBlocks().forEach((rule, members) -> {
+            LOGGER.debug("[ForceGen][GenRule] '{}': {} child(ren) generate by '{}', outside the {}"
+                        + " formation", parseName(), members.size(), rule, formationType);
+            shareOneUnitAcross(rule, members);
+        });
+        buildFormation(split.formationMembers(), false);
+    }
+
+    /**
+     * How a formation-typed node's children divide between the formation and the blocks generated
+     * apart from it.
+     *
+     * @param sharedUnitBlocks the children of each block asking for one unit across the block, keyed by
+     *                         that block's rule
+     * @param formationMembers the children the formation itself is built from
+     */
+    record FormationSplit(Map<String, List<ForceDescriptor>> sharedUnitBlocks,
+                          List<ForceDescriptor> formationMembers) {
+    }
+
+    /**
+     * Divides a formation-typed node's children by what their {@code <subforces>} block asked for.
+     *
+     * <p>Package-private so the split can be tested on its own: which child goes where is the whole of
+     * the decision, and testing it through generation would need the unit tables and a die roll.</p>
+     *
+     * @param subs the node's children, each tagged with its block's rule or with none
+     *
+     * @return the division of those children
+     */
+    static FormationSplit splitForFormation(List<ForceDescriptor> subs) {
+        Map<String, List<ForceDescriptor>> sharedUnitBlocks = new LinkedHashMap<>();
+        List<ForceDescriptor> formationMembers = new ArrayList<>();
+        for (ForceDescriptor sub : subs) {
+            String rule = sub.getBlockGenerationRule();
+            // A block declaring no rule leaves its children with a null one, and an immutable Set
+            // throws rather than answering contains(null), so the null case is settled first.
+            boolean sharesOneUnit = (rule != null) && SHARED_UNIT_RULES.contains(rule);
+            if (sharesOneUnit) {
+                sharedUnitBlocks.computeIfAbsent(rule, key -> new ArrayList<>()).add(sub);
+            } else {
+                formationMembers.add(sub);
+            }
+        }
+        return new FormationSplit(sharedUnitBlocks, formationMembers);
+    }
+
+    /**
+     * Builds the node's formation from the given members, falling back to an ordinary lance when the
+     * formation's requirements cannot be met.
+     *
+     * @param members    the children the formation is to be made of
+     * @param pinChassis whether a non-leaf child is pinned to the chassis rather than the exact model
+     */
+    private void buildFormation(List<ForceDescriptor> members, boolean pinChassis) {
+        // In cases like Novas and air lances the formation rules only apply to some of the units.
+        if (!generateAndAssignFormation(members, pinChassis, 0)) {
+            LOGGER.debug("[ForceGen][GenRule] '{}': {} could not be fulfilled by {} child(ren);"
+                        + " generating them as an ordinary lance", parseName(), formationType,
+                  members.size());
+            generateLance(members);
+            formationType = null;
+        }
+    }
+
+    private void generateByRule(String rule, List<ForceDescriptor> members) {
+        if (members.isEmpty()) {
+            return;
+        }
+        LOGGER.debug("[ForceGen][GenRule] '{}': generating {} child(ren) by '{}'",
+              parseName(), members.size(), rule);
+        switch (rule) {
+            case "group" -> generateLance(members);
+            // One unit picked for the whole block and pinned to every member, so the block comes out
+            // uniform. Members that already carry a pick are left alone, an ancestor having set it.
+            case "model", "chassis" -> shareOneUnitAcross(rule, members);
+            default -> LOGGER.warn("[ForceGen][GenRule] '{}': unknown generate rule '{}'; ignored",
+                  parseName(), rule);
+        }
+    }
+
+    /**
+     * Picks a single unit for the group and pins it to every member.
+     *
+     * @param rule    {@code chassis} to share only the chassis, otherwise the exact model
+     * @param members the children to make uniform
+     */
+    private void shareOneUnitAcross(String rule, List<ForceDescriptor> members) {
+        boolean shareChassis = rule.equals("chassis");
+        // A pick already made for this node - by a formation one level up, say - reaches the members when each one
+        // copies its parent's models and chassis, which happens after this. Picking another unit here would leave
+        // every member holding two, and each would then draw one of them at random: a Clan aerospace Point came out
+        // as two different fighters. The pick this node already carries is the shared unit.
+        boolean isAlreadyPicked = shareChassis ? !chassis.isEmpty() : !models.isEmpty();
+        if (isAlreadyPicked) {
+            LOGGER.debug("[ForceGen][GenRule] '{}': already carries a {} pick, which its {} child(ren) will share",
+                  parseName(), rule, members.size());
+            return;
+        }
+        // Only the members without a pick are given one. Testing that they all lack one would let a
+        // partly-picked block through and add a second model to those that already had theirs, which
+        // an ancestor had set deliberately.
+        List<ForceDescriptor> unpicked = members.stream()
+                                              .filter(member -> shareChassis
+                                                    ? member.getChassis().isEmpty()
+                                                    : member.getModels().isEmpty())
+                                              .toList();
+        if (unpicked.isEmpty()) {
+            return;
+        }
+        ModelRecord shared = unpicked.getFirst().generate();
+        if (shared == null) {
+            LOGGER.debug("[ForceGen][GenRule] '{}': no unit available to share across {} child(ren)",
+                  parseName(), unpicked.size());
+            return;
+        }
+        for (ForceDescriptor member : unpicked) {
+            if (shareChassis) {
+                member.getChassis().add(shared.getChassis());
+            } else {
+                member.getModels().add(shared.getKey());
+            }
+        }
+        LOGGER.debug("[ForceGen][GenRule] '{}': {} of {} child(ren) share {} '{}'",
+              parseName(), unpicked.size(), members.size(), rule, shared.getKey());
+    }
+
     public void generate(String level) {
         ModelRecord mRec = generate();
         if (mRec != null) {
@@ -894,6 +1186,12 @@ public class ForceDescriptor {
     }
 
     public @Nullable ModelRecord generate() {
+        UnitVariety variety = UnitVariety.active();
+        // A slot's pick is compared with the rest of the formation it belongs to: its parent.
+        return (variety == null) ? generatePick() : variety.inFormation(parent, this::generatePick);
+    }
+
+    private @Nullable ModelRecord generatePick() {
         // A null unit type means there is no concrete element to generate here (e.g. a
         // subforce that failed to inherit a unitType). Bail out gracefully instead of NPEing
         // in the failure-logging path below, which would abort the entire force generation.
@@ -907,8 +1205,10 @@ public class ForceDescriptor {
         // let the normal ladder field a non-artillery unit of the original type as a last resort.
         // Skipped when a model is already pinned (battery uniformity), so the pinned gun wins and
         // every element resolves to the same unit instead of re-picking its own.
-        if (models.isEmpty() && ((unitType == UnitType.MEK) || (unitType == UnitType.TANK))
-              && roles.contains(MissionRole.ARTILLERY)) {
+        boolean hasNoPinnedModel = models.isEmpty();
+        boolean carriesArtillery = roles.contains(MissionRole.ARTILLERY);
+        boolean canMountArtillery = isUnitType(UnitType.MEK) || isUnitType(UnitType.TANK);
+        if (hasNoPinnedModel && carriesArtillery && canMountArtillery) {
             ModelRecord artilleryUnitRecord = generateArtilleryPreferred();
             if (artilleryUnitRecord != null) {
                 return artilleryUnitRecord;
@@ -919,10 +1219,17 @@ public class ForceDescriptor {
         // A rating-C force may field C/D/F equipment when nothing matches at its own rating,
         // but never the A/B grades reserved for better-equipped commands.
         List<String> failureTrace = new ArrayList<>();
-        for (String ratGenRating : ratingFallbackList()) {
-            ModelRecord modelRecord = generateAtRating(ratGenRating, failureTrace);
-            if (modelRecord != null) {
-                return modelRecord;
+        if (isInfantryClassApplied()) {
+            ModelRecord classedUnit = generateForInfantryClass(failureTrace);
+            if (classedUnit != null) {
+                return classedUnit;
+            }
+        } else {
+            for (String ratGenRating : ratingFallbackList()) {
+                ModelRecord modelRecord = generateAtRating(ratGenRating, failureTrace, true);
+                if (modelRecord != null) {
+                    return modelRecord;
+                }
             }
         }
 
@@ -953,7 +1260,7 @@ public class ForceDescriptor {
      * Renders a unit type for diagnostic messages without unboxing a {@code null}.
      *
      * <p>{@link #unitType} is a nullable {@link Integer} - a subforce can spawn child nodes without
-     * propagating a unit type (see {@link #generateAtRating(String, List)}) - while
+     * propagating a unit type (see {@link #generateAtRating(String, List, boolean)}) - while
      * {@link UnitType#getTypeDisplayableName(int)} takes a primitive. Passing the field straight through
      * throws a {@link NullPointerException} on unboxing, and because logger arguments are evaluated
      * eagerly it throws even when {@code DEBUG} is disabled.</p>
@@ -974,7 +1281,7 @@ public class ForceDescriptor {
      * every leaf of the force tree, so a per-attempt loop floods the log and violates the project rule
      * against logging inside loops.</p>
      *
-     * @param failureTrace the attempt descriptions gathered by {@link #generateAtRating(String, List)}; may
+     * @param failureTrace the attempt descriptions gathered by {@link #generateAtRating(String, List, boolean)}; may
      *                     be empty when {@code DEBUG} is disabled, in which case nothing is appended
      *
      * @return a newline-prefixed block of indented attempt lines, or the empty string when there are none
@@ -1002,7 +1309,7 @@ public class ForceDescriptor {
     private @Nullable ModelRecord generateArtilleryPreferred() {
         // Front-line (Mek) prefers an artillery Mek, then an artillery vehicle. Second-line (Tank)
         // stays vehicle, honoring the "front line = Mek, otherwise = vehicle" rule.
-        int[] preferredTypes = (unitType == UnitType.TANK)
+        int[] preferredTypes = isUnitType(UnitType.TANK)
               ? new int[] { UnitType.TANK }
               : new int[] { UnitType.MEK, UnitType.TANK };
         for (int candidateType : preferredTypes) {
@@ -1039,6 +1346,43 @@ public class ForceDescriptor {
     }
 
     /**
+     * Picks a unit for a slot held to an infantry class, preferring the faction's own units at any rating over other
+     * factions' salvage.
+     *
+     * <p>A faction's own platoons of a class can be rated: FS jump infantry in 3067 exists only at ratings A to C. The
+     * ordinary ladder never steps up a rating, and salvage draws from other factions' tables, so a D-rated FS jump
+     * battalion filled up with Clan and Kurita platoons and left the rest of its slots empty. Here the faction's own
+     * table is tried at the force's rating and every worse one, then at every better one, and only then is salvage
+     * allowed.</p>
+     *
+     * @param failureTrace collects one line per attempt for the failure log
+     *
+     * @return the unit, or {@code null} if neither the faction nor its salvage has one of the class
+     */
+    private @Nullable ModelRecord generateForInfantryClass(List<String> failureTrace) {
+        List<String> ownRatingsFirst = new ArrayList<>(ratingFallbackList());
+        Ruleset ruleset = Ruleset.findRuleset(this);
+        if (ruleset != null) {
+            ownRatingsFirst.addAll(ruleset.getRatingsBetterThan(ratGeneratorRating()));
+        }
+        for (String ratGenRating : ownRatingsFirst) {
+            ModelRecord ownUnit = generateAtRating(ratGenRating, failureTrace, false);
+            if (ownUnit != null) {
+                return ownUnit;
+            }
+        }
+        for (String ratGenRating : ratingFallbackList()) {
+            ModelRecord salvagedUnit = generateAtRating(ratGenRating, failureTrace, true);
+            if (salvagedUnit != null) {
+                LOGGER.debug("[ForceGen][InfantryClass] {} {}: none of the faction's own at any rating; salvaged {}",
+                      faction, infantryClass, salvagedUnit.getKey());
+                return salvagedUnit;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Builds the equipment-rating fallback ladder for {@link #generate()}: the force's own resolved rating followed by
      * each progressively worse rating in the faction's rating system. Generation tries each in order and stops at the
      * first that yields a unit, so worse ratings act only as a safety net - the force never fields equipment better
@@ -1061,8 +1405,14 @@ public class ForceDescriptor {
      * tries the next closest weight class, then ignores mission role, then the next weight class, then ignores motive
      * types, then the remaining weight classes. Returns {@code null} if no unit could be generated at the given
      * rating.
+     *
+     * @param ratGenRating the equipment rating to draw at
+     * @param failureTrace collects one line per attempt for the failure log
+     * @param allowSalvage {@code false} to draw an infantry-class pick from the faction's own table only; ordinary
+     *                     picks always allow salvage
      */
-    private @Nullable ModelRecord generateAtRating(String ratGenRating, List<String> failureTrace) {
+    private @Nullable ModelRecord generateAtRating(String ratGenRating, List<String> failureTrace,
+          boolean allowSalvage) {
         final int[][] alternateWeights = { { 1, 2, 3, 4, 5 }, // UL
                                            { 2, 0, 3, 4, 5 }, // L
                                            { 3, 1, 4, 0, 5 }, // M
@@ -1089,7 +1439,7 @@ public class ForceDescriptor {
         while (weightTierIndex < 5) {
             for (int roleStrictness = 3; roleStrictness >= 0; roleStrictness--) {
                 List<Integer> weightClasses = new ArrayList<>();
-                if (useWeightClass() && null != workingCopy.getWeightClass()
+                if (useWeightClass() && workingCopy.getWeightClass() != null
                       && workingCopy.getWeightClass() >= EntityWeightClass.WEIGHT_ULTRA_LIGHT) {
                     weightClasses.add(workingCopy.getWeightClass());
                 }
@@ -1102,11 +1452,20 @@ public class ForceDescriptor {
                       workingCopy.getMovementModes(),
                       workingCopy.getRoles(),
                       roleStrictness);
+                // The infantry class is part of every filter, not of the table's movement modes: the ladder below
+                // clears the movement modes when a pick fails, and a class the player asked for must not go with them.
                 MekSummary mekSummary;
                 if (!workingCopy.getModels().isEmpty()) {
-                    mekSummary = table.generateUnit(unit -> workingCopy.getModels().contains(unit.getName()));
+                    mekSummary = table.generateUnit(unit -> workingCopy.getModels().contains(unit.getName())
+                          && workingCopy.acceptsForInfantryClass(unit));
                 } else if (!workingCopy.getChassis().isEmpty()) {
-                    mekSummary = table.generateUnit(unit -> workingCopy.getChassis().contains(unit.getChassis()));
+                    mekSummary = table.generateUnit(unit -> workingCopy.getChassis().contains(unit.getChassis())
+                          && !excludedModels.contains(unit.getName())
+                          && workingCopy.acceptsForInfantryClass(unit));
+                } else if (workingCopy.isInfantryClassApplied()) {
+                    mekSummary = allowSalvage
+                          ? table.generateUnit(workingCopy::acceptsForInfantryClass)
+                          : table.generateUnitWithoutSalvage(workingCopy::acceptsForInfantryClass);
                 } else {
                     mekSummary = table.generateUnit();
                 }
@@ -1143,7 +1502,7 @@ public class ForceDescriptor {
                     workingCopy.getMovementModes().clear();
                 } else {
                     if (useWeightClass() &&
-                          null != weightClass &&
+                        weightClass != null &&
                           weightClass != -1 &&
                           weightClass < alternateWeights.length &&
                           weightTierIndex < alternateWeights[weightClass].length) {
@@ -1188,7 +1547,7 @@ public class ForceDescriptor {
         int count = subForces.size() + attached.size();
         subForces.forEach(fd -> fd.loadEntities(l, progress / count));
         attached.forEach(fd -> fd.loadEntities(l, progress / count));
-        if (count == 0 && null != l) {
+        if (count == 0 && l != null) {
             l.updateProgress(progress, "Loading entities");
         }
     }
@@ -1215,9 +1574,40 @@ public class ForceDescriptor {
         StringBuilder result = new StringBuilder();
         for (int i = ancestors.size() - 1; i >= 0; i--) {
             ForceDescriptor ancestor = ancestors.get(i);
+            if (ancestor.forceId < 0) {
+                // A holder that was never given a force id - the wrapper an accumulated command model sits in -
+                // is not a force the game should see.
+                continue;
+            }
             result.append(ancestor.getCombinedDisplayName()).append('|').append(ancestor.forceId).append("||");
         }
         return result.toString();
+    }
+
+    /**
+     * Renumbers every formation under this node and rewrites the force string of every unit beneath it, so the
+     * game rebuilds the tree as it stands now.
+     *
+     * <p>Needed once rolls have been accumulated into one command: each roll numbered its own formations from one
+     * and stamped its units when it was generated, so two rolls sent together would collide on the same ids and
+     * the second roll's units would be filed into the first roll's formations. Renumbering from this node also
+     * leaves any wrapper above it out of the force strings.</p>
+     */
+    public void refreshForceStrings() {
+        assignForceIds(1);
+        restampForceStrings();
+    }
+
+    private void restampForceStrings() {
+        if (entity != null) {
+            entity.setForceString(getForceString());
+        }
+        for (ForceDescriptor sub : subForces) {
+            sub.restampForceStrings();
+        }
+        for (ForceDescriptor attachedForce : attached) {
+            attachedForce.restampForceStrings();
+        }
     }
 
     /**
@@ -1453,7 +1843,10 @@ public class ForceDescriptor {
                 } else {
                     uniqueCount.put(subForces.get(i).name, 1);
                 }
-            } else if (subForces.get(i).name.matches(".*\\{[^:]*}.*")) {
+            } else if (subForces.get(i).name.matches(".*\\{(?!echelon})[^:]*}.*")) {
+                // {echelon} is excluded on purpose: it describes the node's size rather than its
+                // position, so a name carrying only that token must not consume a sequence index and
+                // shift its siblings' ordinals.
                 subForces.get(i).nameIndex = index++;
             }
         }
@@ -1550,7 +1943,7 @@ public class ForceDescriptor {
      */
     public ForceDescriptor assignTransport() {
         if ((getDropshipPct() <= 0) && (getJumpshipPct() <= 0)
-              && (getWarshipPct() <= 0) && (getCargo() <= 0)) {
+              && (getWarshipPct() <= 0)) {
             return null;
         }
         TransportCalculator tp = new TransportCalculator(this);
@@ -1568,19 +1961,28 @@ public class ForceDescriptor {
         //   Clan: Stars of 5 vessels each
         //   IS/Periphery/SLDF: Strategic Operations hierarchy — Flotilla (2) / Division (3 Flotillas) / Squadron (3 Divisions)
         transports.setName("Naval Units");
+        transports.transportRoot = true;
         // TODO: put this in the faction files
-        transports.setEchelon(isClan ? 7 : 9);
+        transports.setEchelon(isClan ? 7 : ECHELON_NAVAL_ROOT);
         transports.setCoRank(35);
 
         // Always render the categories in the canonical order: WarShips first, then JumpShips, then DropShips.
         if (isClan) {
             addClanCategory(transports, warships, "WarShip Stars");
             addClanCategory(transports, jumpships, "JumpShip Stars");
-            addClanCategory(transports, dropships, "DropShip Stars");
         } else {
             addISCategory(transports, warships, "WarShips");
             addISCategory(transports, jumpships, "JumpShips");
-            addISCategory(transports, dropships, "DropShips");
+        }
+        // A DropShip with a docking collar to go to is listed under the JumpShip or WarShip that carries it, the
+        // way a carrier's fighters are listed under the carrier, so the tree says what is docked to what. Only the
+        // DropShips left without a collar form a category of their own, so the branch reads WarShips, JumpShips,
+        // DropShips, each ship followed by what it carries.
+        List<MekSummary> undocked = dockUnderCollarShips(transports, dropships);
+        if (isClan) {
+            addClanCategory(transports, undocked, "DropShip Stars");
+        } else {
+            addISCategory(transports, undocked, "DropShips");
         }
 
         transports.assignCommanders();
@@ -1611,7 +2013,7 @@ public class ForceDescriptor {
             return;
         }
         ForceDescriptor category = createGroupNode(parent, categoryName,
-              /* echelon = DIVISION */ 8, /* coRank = MAJ_GENERAL */ 42);
+              ECHELON_NAVAL_CATEGORY, /* coRank = MAJ_GENERAL */ 42);
         addNavalHierarchy(category, ships);
     }
 
@@ -1640,70 +2042,78 @@ public class ForceDescriptor {
         }
     }
 
+    /** Ships in a Flotilla: small or medium vessels operating alone or in pairs. */
+    private static final int SHIPS_PER_FLOTILLA = 2;
+    /** Flotillas in a Division: six vessels. */
+    private static final int FLOTILLAS_PER_DIVISION = 3;
+    /** Divisions in a Squadron: up to eighteen vessels. */
+    private static final int DIVISIONS_PER_SQUADRON = 3;
+    private static final int FLOTILLAS_PER_SQUADRON = FLOTILLAS_PER_DIVISION * DIVISIONS_PER_SQUADRON;
+
     /**
-     * Adds Inner Sphere / SLDF naval hierarchy groupings per Strategic Operations under the given category node:
+     * Adds the Inner Sphere / SLDF naval hierarchy under the given category node, following the
+     * organisation described for the Star League Navy after Commanding Admiral David Peterson's
+     * reforms:
      * <ul>
-     *   <li>Flotilla = 2 vessels</li>
-     *   <li>Division = 3 Flotillas (6 vessels)</li>
-     *   <li>Squadron = 3 Divisions (18 vessels)</li>
+     *   <li><b>Flotilla</b> - one or two vessels, small or medium ships operating alone or in pairs</li>
+     *   <li><b>Division</b> - six vessels (three Flotillas)</li>
+     *   <li><b>Squadron</b> - up to eighteen vessels (three Divisions), capable of independent
+     *       operation</li>
+     *   <li><b>Fleet</b> - a number of Squadrons combined</li>
      * </ul>
-     * Picks the minimum nesting depth that fits the ship count: 1-2 ships render as a single Flotilla,
-     * 3-6 as Flotillas under one Division, 7-18 as Divisions under one or more Squadrons, 19+ as multiple Squadrons.
-     * The ship type is conveyed by the parent category node, so inner-level names are unprefixed
-     * (e.g., "Flotilla Alpha" rather than "WarShip Flotilla Alpha").
+     *
+     * <p>The shallowest structure that fits the ship count is used, so a pair of DropShips is a single
+     * Flotilla rather than a Fleet of one Squadron of one Division. Nodes are named for their echelon
+     * only ("Flotilla", "Division"); the designator that distinguishes siblings is applied downstream
+     * by the consumer's naming convention, so naval formations follow the same scheme as the rest of
+     * the force instead of a hardcoded one of their own.</p>
      *
      * @param parent The category node ("WarShips" / "JumpShips" / "DropShips") that receives the hierarchy
      * @param ships  The ships to add (must be non-empty; callers should pre-filter)
      */
     private void addNavalHierarchy(ForceDescriptor parent, List<MekSummary> ships) {
-        // Slice into Flotillas of 2.
         List<List<MekSummary>> flotillas = new ArrayList<>();
-        for (int i = 0; i < ships.size(); i += 2) {
-            flotillas.add(ships.subList(i, Math.min(i + 2, ships.size())));
+        for (int i = 0; i < ships.size(); i += SHIPS_PER_FLOTILLA) {
+            flotillas.add(ships.subList(i, Math.min(i + SHIPS_PER_FLOTILLA, ships.size())));
         }
 
         if (flotillas.size() <= 1) {
-            // 1-2 ships: one Flotilla directly under category
-            addFlotilla(parent, flotillas.get(0), null);
-        } else if (flotillas.size() <= 3) {
-            // 3-6 ships: one Division of Flotillas
-            ForceDescriptor division = createGroupNode(parent, "Division",
-                  /* echelon = BRIGADE */ 7, /* coRank = LT_COLONEL */ 37);
-            for (int f = 0; f < flotillas.size(); f++) {
-                addFlotilla(division, flotillas.get(f), PHONETIC[f]);
-            }
-        } else if (flotillas.size() <= 9) {
-            // 7-18 ships: multiple Divisions, no Squadron wrapper needed
-            int numDivisions = (flotillas.size() + 2) / 3;
-            for (int d = 0; d < numDivisions; d++) {
-                ForceDescriptor division = createGroupNode(parent, "Division " + PHONETIC[d],
-                      /* echelon = BRIGADE */ 7, /* coRank = LT_COLONEL */ 37);
-                int startF = d * 3;
-                int endF = Math.min(startF + 3, flotillas.size());
-                for (int f = startF; f < endF; f++) {
-                    addFlotilla(division, flotillas.get(f), PHONETIC[f - startF]);
-                }
-            }
+            // Up to 2 ships: a lone Flotilla, directly under the category.
+            addFlotilla(parent, flotillas.get(0));
+        } else if (flotillas.size() <= FLOTILLAS_PER_DIVISION) {
+            // Up to 6 ships: one Division of Flotillas.
+            addDivision(parent, flotillas, 0, flotillas.size());
+        } else if (flotillas.size() <= FLOTILLAS_PER_SQUADRON) {
+            // Up to 18 ships: one Squadron of Divisions.
+            addSquadron(parent, flotillas, 0, flotillas.size());
         } else {
-            // 19+ ships: full hierarchy with Squadrons of Divisions of Flotillas
-            int numSquadrons = (flotillas.size() + 8) / 9;
-            for (int s = 0; s < numSquadrons; s++) {
-                String squadronName = (numSquadrons > 1) ? "Squadron " + PHONETIC[s] : "Squadron";
-                ForceDescriptor squadron = createGroupNode(parent, squadronName,
-                      /* echelon = DIVISION */ 8, /* coRank = COLONEL */ 38);
-                int startF = s * 9;
-                int endF = Math.min(startF + 9, flotillas.size());
-                int divisionsInSquadron = (endF - startF + 2) / 3;
-                for (int d = 0; d < divisionsInSquadron; d++) {
-                    ForceDescriptor division = createGroupNode(squadron, "Division " + PHONETIC[d],
-                          /* echelon = BRIGADE */ 7, /* coRank = LT_COLONEL */ 37);
-                    int divStartF = startF + d * 3;
-                    int divEndF = Math.min(divStartF + 3, flotillas.size());
-                    for (int f = divStartF; f < divEndF; f++) {
-                        addFlotilla(division, flotillas.get(f), PHONETIC[f - divStartF]);
-                    }
-                }
+            // More than a Squadron's worth: Squadrons combine into a Fleet.
+            ForceDescriptor fleet = createGroupNode(parent, "Fleet",
+                  ECHELON_NAVAL_FLEET, /* coRank = LT_GENERAL */ 39);
+            for (int start = 0; start < flotillas.size(); start += FLOTILLAS_PER_SQUADRON) {
+                addSquadron(fleet, flotillas,
+                      start, Math.min(start + FLOTILLAS_PER_SQUADRON, flotillas.size()));
             }
+        }
+    }
+
+    /** Adds one Squadron covering {@code flotillas[startIndex, endIndex)}, split into Divisions. */
+    private void addSquadron(ForceDescriptor parent, List<List<MekSummary>> flotillas,
+          int startIndex, int endIndex) {
+        ForceDescriptor squadron = createGroupNode(parent, "Squadron",
+              ECHELON_NAVAL_SQUADRON, /* coRank = COLONEL */ 38);
+        for (int start = startIndex; start < endIndex; start += FLOTILLAS_PER_DIVISION) {
+            addDivision(squadron, flotillas, start, Math.min(start + FLOTILLAS_PER_DIVISION, endIndex));
+        }
+    }
+
+    /** Adds one Division covering {@code flotillas[startIndex, endIndex)}. */
+    private void addDivision(ForceDescriptor parent, List<List<MekSummary>> flotillas,
+          int startIndex, int endIndex) {
+        ForceDescriptor division = createGroupNode(parent, "Division",
+              ECHELON_NAVAL_DIVISION, /* coRank = LT_COLONEL */ 37);
+        for (int index = startIndex; index < endIndex; index++) {
+            addFlotilla(division, flotillas.get(index));
         }
     }
 
@@ -1726,10 +2136,9 @@ public class ForceDescriptor {
      * Suffix is appended to the Flotilla name only when non-null (e.g., when there are multiple Flotillas at the
      * same level under the same Division).
      */
-    private void addFlotilla(ForceDescriptor parent, List<MekSummary> flotillaShips, @Nullable String suffix) {
-        String name = "Flotilla" + (suffix != null ? " " + suffix : "");
-        ForceDescriptor flotilla = createGroupNode(parent, name,
-              /* echelon = REGIMENT */ 6, /* coRank = MAJOR */ 35);
+    private void addFlotilla(ForceDescriptor parent, List<MekSummary> flotillaShips) {
+        ForceDescriptor flotilla = createGroupNode(parent, "Flotilla",
+              ECHELON_NAVAL_FLOTILLA, /* coRank = MAJOR */ 35);
         for (MekSummary ms : flotillaShips) {
             addShipElement(flotilla, ms);
         }
@@ -1739,11 +2148,46 @@ public class ForceDescriptor {
      * Adds an element-level (echelon 1) child for an individual vessel.
      */
     private void addShipElement(ForceDescriptor parent, MekSummary ms) {
-        ForceDescriptor sub = parent.createChild(parent.getSubForces().size());
-        sub.setUnit(RATGenerator.getInstance().getModelRecord(ms.getName()));
+        parent.addSubForce(shipElement(parent, ms));
+    }
+
+    private ForceDescriptor shipElement(ForceDescriptor parent, MekSummary hull) {
+        ForceDescriptor sub = parent.createChild(parent.getSubForces().size() + parent.getAttached().size());
+        // A child inherits its parent's unit type, and setUnit only fills one in when there is none, so a
+        // DropShip created under a JumpShip element would be typed as a JumpShip. Clear it so the design decides.
+        sub.setUnitType(null);
+        sub.setUnit(RATGenerator.getInstance().getModelRecord(hull.getName()));
         sub.setEchelon(1);
         sub.setCoRank(33);
-        parent.addSubForce(sub);
+        return sub;
+    }
+
+    /**
+     * Docks DropShips to the JumpShips and WarShips already in the naval branch, in order, each ship taking as many
+     * as it has collars. A docked DropShip becomes an attached child of the ship that carries it.
+     *
+     * @param transports the naval branch, with its WarShip and JumpShip categories already built
+     * @param dropships  the DropShips to dock, in the order they were drawn
+     *
+     * @return the DropShips no ship had a collar for, in the same order
+     */
+    private List<MekSummary> dockUnderCollarShips(ForceDescriptor transports, List<MekSummary> dropships) {
+        List<ForceDescriptor> collarShips = new ArrayList<>();
+        transports.collectCarriers(collarShips);
+        List<MekSummary> undocked = new ArrayList<>(dropships);
+        for (ForceDescriptor ship : collarShips) {
+            MekSummary shipSummary = MekSummaryCache.getInstance().getMek(ship.getModelName());
+            int collars = (shipSummary == null) ? 0 : TransportCalculator.dockingCollars(shipSummary);
+            while ((collars > 0) && !undocked.isEmpty()) {
+                ForceDescriptor docked = shipElement(ship, undocked.removeFirst());
+                // Crew it here: the force-wide commander pass does not descend into what hangs off a ship
+                // element, and without a crew loadEntities has nothing to build the entity's crew from.
+                docked.assignCommanders();
+                ship.addAttached(docked);
+                collars--;
+            }
+        }
+        return undocked;
     }
 
     public static int decodeWeightClass(String code) {
@@ -1802,7 +2246,7 @@ public class ForceDescriptor {
         double wc;
         if (!subForces.isEmpty()) {
             wc = subForces.stream().mapToDouble(ForceDescriptor::recalcWeightClass).sum() / subForces.size();
-        } else if (null != weightClass && weightClass >= 0) {
+        } else if (weightClass != null && weightClass >= 0) {
             wc = weightClass;
         } else {
             wc = EntityWeightClass.WEIGHT_MEDIUM;
@@ -1816,7 +2260,7 @@ public class ForceDescriptor {
         // weight-skewed factions (e.g. Clan Coyote) where every cluster averages Heavy and the
         // recalculated weight would collapse all names to one type. Falls back to the recalculated
         // weight when the picker never set one (rolledWeightClass null/unset).
-        if (null != nameNodes) {
+        if (nameNodes != null) {
             int recalculatedWeightClass = weightClass;
             if ((rolledWeightClass != null) && (rolledWeightClass >= 0)) {
                 weightClass = rolledWeightClass;
@@ -1926,7 +2370,9 @@ public class ForceDescriptor {
     public String parseName() {
         String retVal = name;
         if (name == null) {
-            String echelonName = Ruleset.findRuleset(this).getEschelonName(this);
+            // Walk the parent chain: a faction that borrows its parent's rules (the Calderon Protectorate uses the
+            // Taurian ones) has no echelon names of its own, and its formations came out with blank names.
+            String echelonName = findEschelonName();
             if (echelonName == null) {
                 return "";
             }
@@ -1946,6 +2392,21 @@ public class ForceDescriptor {
             String parentName = getParent().getName().replaceAll(".*\\[", "").replaceAll("].*", "");
             retVal = retVal.replace("{name:parent}", parentName);
         }
+        // Parent tokens that could not be resolved above (the node is the root of the generated
+        // force, or its parent carries no name index) are dropped together with a directly attached
+        // "/" or "-" separator, so a template like "{cardinal:parent}/{alpha} Company" degrades to
+        // "A Company" for a bare company instead of "/A Company".
+        retVal = retVal.replaceAll("\\{[^}]*:parent}[/-]?", "");
+        // {echelon} names the formation's own size ("Company", "Battalion", "Squadron"). Unlike the
+        // sequence tokens below it does not depend on nameIndex - it describes what this node IS, not
+        // where it sits among its siblings - so it is resolved here, before the nameIndex branch that
+        // would otherwise strip it from an unindexed node.
+        if (retVal.contains("{echelon}")) {
+            String echelonName = findEschelonName();
+            retVal = (echelonName == null)
+                  ? retVal.replaceAll("\\{echelon}\\s?", "")
+                  : retVal.replace("{echelon}", echelonName);
+        }
         if (nameIndex < 0) {
             retVal = retVal.replaceAll("\\{.*?}\\s?", "");
         } else {
@@ -1958,10 +2419,15 @@ public class ForceDescriptor {
             retVal = retVal.replace("{cardinalOrdinal}", cardinalOrdinal(getNameIndex() + 1));
             retVal = retVal.replace("{alpha}", Character.toString((char) (getNameIndex() + 'A')));
             if (retVal.contains("{formation}")) {
-                if (null != formationType && null != formationType.getCategory()) {
+                if (formationType != null && formationType.getName() != null) {
+                    // The formation itself rather than the family it belongs to. A Heavy Battle lance and a Light
+                    // Battle lance are both "Battle" by category, and an Anti-Air lance is "Fire", so naming by
+                    // category threw away the very thing the player chose - a lance built as Anti-Air read "Fire
+                    // Lance" while its own label said Anti-Air.
                     retVal = retVal.replace("{formation}",
-                          formationType.getCategory()
+                          formationType.getName()
                                 .replace("Striker/Cavalry", "Striker")
+                                .replace("Berserker/Close", "Berserker")
                                 .replace(" Squadron", ""));
                 } else {
                     retVal = retVal.replace("{formation} ", "");
@@ -1996,6 +2462,25 @@ public class ForceDescriptor {
         return n + suffix;
     }
 
+    /**
+     * The display name of this node's echelon - "Company", "Battalion", "Trinary", "Level III" - taken
+     * from the {@code eschName} of the first matching {@code <force>} rule, walking up the ruleset
+     * parent chain until one supplies it.
+     *
+     * @return the echelon name, or {@code null} when no ruleset in the chain names this echelon
+     */
+    public @Nullable String findEschelonName() {
+        Ruleset rules = Ruleset.findRuleset(this);
+        while (rules != null) {
+            String echelonName = rules.getEschelonName(this);
+            if (echelonName != null) {
+                return echelonName;
+            }
+            rules = (rules.getParent() == null) ? null : Ruleset.findRuleset(rules.getParent());
+        }
+        return null;
+    }
+
     public String getDescription() {
         StringBuilder retVal = new StringBuilder();
         if (unitType != null) {
@@ -2024,24 +2509,12 @@ public class ForceDescriptor {
         } else if (flags.contains("c3i")) {
             retVal.append(" (C3I)");
         }
-        Ruleset rules = Ruleset.findRuleset(this);
-        String echelonName = null;
-
-        while (echelonName == null && rules != null) {
-            echelonName = rules.getEschelonName(this);
-            if (echelonName == null) {
-                if (rules.getParent() == null) {
-                    rules = null;
-                } else {
-                    rules = Ruleset.findRuleset(rules.getParent());
-                }
-            }
-        }
+        String echelonName = findEschelonName();
 
         if (echelonName != null) {
             retVal.append(" ").append(echelonName);
         }
-        if (null != formationType) {
+        if (formationType != null) {
             retVal.append(" (").append(formationType.getName()).append(")");
         }
         return retVal.toString();
@@ -2128,8 +2601,24 @@ public class ForceDescriptor {
         this.unitType = unitType;
     }
 
+    /**
+     * Null-safe test of this descriptor's unit type. {@code unitType} is a boxed {@link Integer} and
+     * is legitimately {@code null} whenever the ruleset places no restriction on unit type - the
+     * ComStar and Word of Blake tables of contents both declare {@code <unitType>null</unitType>}.
+     * Comparing the field to a {@link UnitType} constant directly unboxes it, so an unrestricted
+     * descriptor throws a {@link NullPointerException} rather than simply failing the test.
+     *
+     * @param candidateUnitType the {@link UnitType} constant to test against
+     *
+     * @return {@code true} if this descriptor has a unit type and it is the given one; {@code false}
+     *       when the descriptor carries no unit type at all
+     */
+    private boolean isUnitType(int candidateUnitType) {
+        return (unitType != null) && (unitType == candidateUnitType);
+    }
+
     public String getUnitTypeName() {
-        if (null != unitType) {
+        if (unitType != null) {
             return UnitType.getTypeDisplayableName(unitType);
         }
         return "";
@@ -2137,6 +2626,83 @@ public class ForceDescriptor {
 
     public HashSet<EntityMovementMode> getMovementModes() {
         return movementModes;
+    }
+
+    /**
+     * @return the kind of conventional infantry the player asked for, or {@code null} for no restriction
+     */
+    public @Nullable InfantryClass getInfantryClass() {
+        return infantryClass;
+    }
+
+    /**
+     * Sets the kind of conventional infantry to generate. Children created afterwards inherit it.
+     *
+     * @param infantryClass the class, or {@code null} for no restriction
+     */
+    public void setInfantryClass(@Nullable InfantryClass infantryClass) {
+        this.infantryClass = infantryClass;
+        if (infantryClass != InfantryClass.BEAST) {
+            infantryClassChassis = null;
+        }
+    }
+
+    /**
+     * @return the beast chassis every platoon of a {@link InfantryClass#BEAST} force rides, or {@code null} when none
+     *       is pinned
+     */
+    public @Nullable String getInfantryClassChassis() {
+        return infantryClassChassis;
+    }
+
+    /**
+     * Pins the beast chassis every platoon of a {@link InfantryClass#BEAST} force rides. The weapons are still picked
+     * per platoon.
+     *
+     * @param chassisName the chassis name, e.g. "Beast Infantry (Horse)", or {@code null} to allow any beast
+     */
+    public void setInfantryClassChassis(@Nullable String chassisName) {
+        infantryClassChassis = chassisName;
+    }
+
+    /**
+     * Whether this node's unit picks are held to an infantry class: a class is set and the node is conventional
+     * infantry. Attached support has its class cleared, and other unit types are never restricted.
+     */
+    boolean isInfantryClassApplied() {
+        return (infantryClass != null) && isUnitType(UnitType.INFANTRY);
+    }
+
+    /**
+     * Whether a unit may fill this node given its infantry class. Always {@code true} when no class applies.
+     *
+     * @param unit a candidate unit
+     *
+     * @return {@code true} when the unit is of the requested class and, for a beast force, rides the pinned beast
+     */
+    boolean acceptsForInfantryClass(MekSummary unit) {
+        if (!isInfantryClassApplied()) {
+            return true;
+        }
+        if (!infantryClass.matches(unit, flags)) {
+            return false;
+        }
+        return (infantryClassChassis == null) || infantryClassChassis.equals(unit.getChassis());
+    }
+
+    /**
+     * Whether a unit already chosen by some other route (a formation pick, a "deployed with" partner) may fill this
+     * node given its infantry class.
+     *
+     * @param unit a candidate unit; {@code null} is never accepted
+     *
+     * @return {@code true} when the unit may be used
+     */
+    boolean acceptsForInfantryClass(@Nullable ModelRecord unit) {
+        if (!isInfantryClassApplied()) {
+            return true;
+        }
+        return (unit != null) && (unit.getMekSummary() != null) && acceptsForInfantryClass(unit.getMekSummary());
     }
 
     public String getRating() {
@@ -2155,7 +2721,7 @@ public class ForceDescriptor {
      */
     public String ratGeneratorRating() {
         FactionRecord fRec = getFactionRec();
-        if ((null != fRec) &&
+        if ((fRec != null) &&
               !fRec.getRatingLevels().contains(rating) &&
               (getRatingLevel() >= 0) &&
               !fRec.getRatingLevels().isEmpty()) {
@@ -2178,8 +2744,131 @@ public class ForceDescriptor {
         return formationType;
     }
 
+    /**
+     * Discards the units drawn for this force and everything under it, leaving the structure intact.
+     *
+     * <p>The tree survives - the lances, their positions and their rules are all untouched - so the same node can be
+     * generated again against a different formation. Without this, a second pass through
+     * {@link #generateUnits(Ruleset.ProgressListener, double)} inherits the chassis and models left behind by the
+     * first and picks against a list already narrowed by units the player has just discarded.</p>
+     *
+     * <p>The element flag is deliberately kept: a leaf is still a leaf, and clearing it would tell the next pass that
+     * this node has units to distribute among children it does not have.</p>
+     */
+    public void clearGeneratedUnits() {
+        entity = null;
+        chassis.clear();
+        models.clear();
+        variants.clear();
+        // The weight class goes with them. Generation overwrites it with the weight of the units it drew, so
+        // leaving it behind makes the next pass pick against the weight of the units just discarded: a Heavy Recon
+        // formation asked for inside a medium company was refused outright and fell back to an ordinary lance.
+        // Cleared, the formation's own requirements decide the weight, which is what asking for it meant.
+        weightClass = null;
+        subForces.forEach(ForceDescriptor::clearGeneratedUnits);
+        attached.forEach(ForceDescriptor::clearGeneratedUnits);
+    }
+
+    /**
+     * Removes every node under this one that ended up holding no unit, along with any formation left empty by that.
+     *
+     * <p>A leaf the unit tables could not fill still gets a commander later, so without this the finished force
+     * shows a named pilot with nothing to crew - and MekHQ turns that node into an empty force. Run after
+     * {@link #generateUnits(Ruleset.ProgressListener, double)} and before commanders are assigned. This node itself
+     * is never removed; a caller holding an empty root still sees the failure in the log.</p>
+     *
+     * @return how many nodes were removed
+     */
+    public int removeNodesWithoutUnits() {
+        int removed = removeNodesWithoutUnits(subForces) + removeNodesWithoutUnits(attached);
+        if (removed > 0) {
+            LOGGER.warn("[ForceGen] Removed {} node(s) with no unit under '{}' (unitType={} faction={} year={})",
+                  removed, name, describeUnitType(unitType), faction, year);
+        }
+        return removed;
+    }
+
+    /**
+     * Whether this force holds any unit of its own, not counting attached support. A force the unit tables could not
+     * fill has none: every slot was removed, leaving at most the support attached to it, such as a regiment's artillery
+     * company with no regiment behind it.
+     *
+     * @return {@code true} when this node or any node under it, outside its attachments, holds a unit
+     */
+    public boolean hasLineUnits() {
+        if (element) {
+            return true;
+        }
+        for (ForceDescriptor subForce : subForces) {
+            if (subForce.hasLineUnits()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int removeNodesWithoutUnits(List<ForceDescriptor> children) {
+        int removed = 0;
+        Iterator<ForceDescriptor> iterator = children.iterator();
+        while (iterator.hasNext()) {
+            ForceDescriptor child = iterator.next();
+            removed += removeNodesWithoutUnits(child.subForces) + removeNodesWithoutUnits(child.attached);
+            if (!child.element && child.subForces.isEmpty() && child.attached.isEmpty()) {
+                LOGGER.debug("[ForceGen] Removing node with no unit: unitType={} echelon={} name='{}'",
+                      describeUnitType(child.unitType), child.echelon, child.name);
+                iterator.remove();
+                removed++;
+            }
+        }
+        return removed;
+    }
+
     public void setFormationType(FormationType ft) {
         formationType = ft;
+    }
+
+    /**
+     * The formation types this node's rule offered, mapped to the weight the ruleset gave each.
+     *
+     * <p>Recorded before the weighted pick is made, so it describes what could have been chosen rather than what
+     * was. Size tells the caller what kind of node this is: more than one entry means a genuine choice was made and
+     * could be made differently, exactly one means the rule narrowed to a single formation - a command lance, say -
+     * and none means the node was never offered a formation at all.</p>
+     *
+     * @return the offered formations and their weights, never {@code null}
+     */
+    public Map<String, Integer> getEligibleFormations() {
+        return (eligibleFormations == null) ? Map.of() : eligibleFormations;
+    }
+
+    public void setEligibleFormations(Map<String, Integer> eligibleFormations) {
+        this.eligibleFormations = (eligibleFormations == null) ? Map.of() : eligibleFormations;
+    }
+
+    /**
+     * The requested distribution of formation types across this force, set on the root node only.
+     *
+     * @return the requested mix, never {@code null}
+     */
+    public FormationMix getFormationMix() {
+        return (formationMix == null) ? FormationMix.EMPTY : formationMix;
+    }
+
+    public void setFormationMix(@Nullable FormationMix formationMix) {
+        this.formationMix = (formationMix == null) ? FormationMix.EMPTY : formationMix;
+    }
+
+    /**
+     * What the formation mix achieved on this force, requested against placed.
+     *
+     * @return the report, or {@code null} when no mix was applied
+     */
+    public @Nullable FormationMixReport getFormationMixReport() {
+        return formationMixReport;
+    }
+
+    public void setFormationMixReport(@Nullable FormationMixReport formationMixReport) {
+        this.formationMixReport = formationMixReport;
     }
 
     public String getGenerationRule() {
@@ -2188,6 +2877,24 @@ public class ForceDescriptor {
 
     public void setGenerationRule(String rule) {
         generationRule = rule;
+    }
+
+    /**
+     * @return the generate rule of the {@code <subforces>} block that created this node, or {@code null} when that
+     *       block declared none
+     */
+    public @Nullable String getBlockGenerationRule() {
+        return blockGenerationRule;
+    }
+
+    /**
+     * Records the generate rule of the {@code <subforces>} block that created this node. Only that block, or a copy
+     * of one of its children, should set it.
+     *
+     * @param rule the block's rule, or {@code null} when it declared none
+     */
+    public void setBlockGenerationRule(@Nullable String rule) {
+        blockGenerationRule = rule;
     }
 
     public Set<MissionRole> getRoles() {
@@ -2314,6 +3021,75 @@ public class ForceDescriptor {
         this.attached = attached;
     }
 
+    /**
+     * Whether this descriptor is included in the generated force. Preview-only state (not persisted):
+     * a host UI can mark nodes excluded so they are struck out in the preview and skipped when the
+     * force is committed.
+     *
+     * @return {@code true} if this node is included (the default)
+     */
+    public boolean isIncluded() {
+        return included;
+    }
+
+    /**
+     * @return the model names of every unit under this node that will be built: struck-out units and branches are
+     *       left out, attached forces counted
+     *
+     * @author Illiani
+     * @since 0.51.01
+     */
+    public List<String> getIncludedUnitModelNames() {
+        List<String> modelNames = new ArrayList<>();
+        collectIncludedUnitModelNames(modelNames);
+        return modelNames;
+    }
+
+    private void collectIncludedUnitModelNames(List<String> modelNames) {
+        if (!included) {
+            return;
+        }
+        if (element && !models.isEmpty()) {
+            modelNames.add(getModelName());
+        }
+        for (ForceDescriptor sub : subForces) {
+            sub.collectIncludedUnitModelNames(modelNames);
+        }
+        for (ForceDescriptor attachedForce : attached) {
+            attachedForce.collectIncludedUnitModelNames(modelNames);
+        }
+    }
+
+    /**
+     * Sets whether this descriptor alone is included. Use {@link #setIncludedRecursively(boolean)} to
+     * cascade the value to the whole subtree.
+     *
+     * @param included {@code true} to include this node, {@code false} to exclude it
+     */
+    public void setIncluded(boolean included) {
+        this.included = included;
+    }
+
+    /**
+     * Sets this descriptor's included flag and cascades the same value to every subforce and attached
+     * descriptor beneath it, so excluding (or re-including) a formation applies to all its units.
+     *
+     * @param included {@code true} to include the subtree, {@code false} to exclude it
+     */
+    public void setIncludedRecursively(boolean included) {
+        this.included = included;
+        if (subForces != null) {
+            for (ForceDescriptor subForce : subForces) {
+                subForce.setIncludedRecursively(included);
+            }
+        }
+        if (attached != null) {
+            for (ForceDescriptor attachedForce : attached) {
+                attachedForce.setIncludedRecursively(included);
+            }
+        }
+    }
+
     public void addAttached(ForceDescriptor forceDescriptor) {
         attached.add(forceDescriptor);
         // Set the back-reference so getForceString() walks an attached support force up through its
@@ -2343,29 +3119,39 @@ public class ForceDescriptor {
     public void addFighterComplement() {
         List<ForceDescriptor> carriers = new ArrayList<>();
         collectCarriers(carriers);
+        if (carriers.isEmpty()) {
+            // The single most common reason a player sees no fighters: the option is on, but this
+            // subtree holds no large craft at all.
+            LOGGER.debug("[ForceGen][Fighters] no large craft in this subtree; nothing to fill");
+            return;
+        }
+        LOGGER.debug("[ForceGen][Fighters] filling ASF bays for {} carrier(s)", carriers.size());
+        int carriersSkippedUnknownModel = 0;
+        int carriersSkippedNoBays = 0;
         for (ForceDescriptor carrier : carriers) {
             MekSummary carrierSummary = MekSummaryCache.getInstance().getMek(carrier.getModelName());
             if (carrierSummary == null) {
+                carriersSkippedUnknownModel++;
                 continue;
             }
             int capacity = TransportCalculator.fighterBayCapacity(carrierSummary);
             if (capacity <= 0) {
+                carriersSkippedNoBays++;
                 continue;
             }
             UnitTable table = UnitTable.findTable(carrier.getFactionRec(),
                   UnitType.AEROSPACE_FIGHTER,
                   carrier.getYear(),
-                  carrier.getRating(),
+                  carrier.ratGeneratorRating(),
                   null,
                   ModelRecord.NETWORK_NONE,
                   EnumSet.noneOf(EntityMovementMode.class),
                   EnumSet.noneOf(MissionRole.class),
                   0);
-            // Organize the complement into Clan Stars of Points / IS Squadrons of Flights, each
-            // attached under the carrier so the ToE reads: Ship -> Star/Squadron -> Point/Flight ->
-            // fighters. The two fighters in a Point (Clan) or Flight (IS) are the SAME model: a Point
-            // is a matched pair. Different Points within a Star may differ. A Clan aero Star is 5
-            // Points of 2 = 10; an IS aero Squadron is 3 Flights of 2 = 6.
+            // Organize the complement into the shallowest formation that actually fits the bay
+            // capacity, so a Leopard's two fighter bays produce a single Flight rather than a Squadron
+            // wrapping one Flight. The two fighters in a Point (Clan) or Flight (IS) are the SAME
+            // model - a Point is a matched pair - while different Points within a Star may differ.
             boolean clan = (carrier.getFactionRec() != null) && carrier.getFactionRec().isClan();
             int pointSize = 2;
             int pointsPerGroup = clan ? 5 : 3;
@@ -2376,20 +3162,42 @@ public class ForceDescriptor {
             int pointEchelon = clan ? 2 : 3;
             int totalGroups = (capacity + groupSize - 1) / groupSize;
 
+            // A capacity of one Point/Flight or less needs no wrapper at all: the Flight hangs
+            // directly off the ship.
+            boolean wrapInGroups = capacity > pointSize;
+            // With more than one group the complement has outgrown a Squadron/Star, so those in turn
+            // nest under a Group (IS) or Binary/Trinary (Clan) to keep the ToE readable.
+            ForceDescriptor groupParent = carrier;
+            if (wrapInGroups && (totalGroups > 1)) {
+                groupParent = carrier.createChild(carrier.getAttached().size());
+                groupParent.getModels().clear();
+                groupParent.getChassis().clear();
+                groupParent.setUnitType(UnitType.AEROSPACE_FIGHTER);
+                groupParent.setName(clan ? "Binary" : "Group");
+                groupParent.setEchelon(clan ? 4 : 5);
+                groupParent.setCoRank(34);
+                carrier.addAttached(groupParent);
+            }
+
             int generated = 0;
             boolean exhausted = false;
             for (int groupIndex = 0; (groupIndex < totalGroups) && !exhausted; groupIndex++) {
-                String groupName = (totalGroups > 1)
-                      ? PHONETIC[Math.min(groupIndex, PHONETIC.length - 1)] + " " + groupLabel
-                      : groupLabel;
-                ForceDescriptor group = carrier.createChild(carrier.getAttached().size());
-                group.getModels().clear();
-                group.getChassis().clear();
-                group.setUnitType(UnitType.AEROSPACE_FIGHTER);
-                group.setName(groupName);
-                group.setEchelon(groupEchelon);
-                group.setCoRank(32);
-                carrier.addAttached(group);
+                ForceDescriptor group;
+                if (wrapInGroups) {
+                    group = groupParent.createChild(groupParent.getAttached().size());
+                    group.getModels().clear();
+                    group.getChassis().clear();
+                    group.setUnitType(UnitType.AEROSPACE_FIGHTER);
+                    group.setName((totalGroups > 1)
+                          ? PHONETIC[Math.min(groupIndex, PHONETIC.length - 1)] + " " + groupLabel
+                          : groupLabel);
+                    group.setEchelon(groupEchelon);
+                    group.setCoRank(32);
+                    groupParent.addAttached(group);
+                } else {
+                    // No wrapper: the Flight itself is attached straight to the ship below.
+                    group = carrier;
+                }
 
                 int groupTarget = Math.min(groupSize, capacity - generated);
                 int producedInGroup = 0;
@@ -2412,9 +3220,12 @@ public class ForceDescriptor {
                     point.setName(pointLabel + " " + (pointIndex + 1));
                     point.setEchelon(pointEchelon);
                     point.setCoRank(16);
-                    if (pointIndex == 0) {
+                    if (wrapInGroups && (pointIndex == 0)) {
                         group.addSubForce(point);
                     } else {
+                        // Without a wrapper the "group" IS the carrier, and a ship must stay a leaf
+                        // element - adding a subforce would stop it being recognised as a carrier and
+                        // break entity loading. Attach in that case.
                         group.addAttached(point);
                     }
                     pointIndex++;
@@ -2426,17 +3237,31 @@ public class ForceDescriptor {
                         fighter.setUnit(RATGenerator.getInstance().getModelRecord(fighterSummary.getName()));
                         fighter.setEchelon(1);
                         fighter.setCoRank(31);
+                        // Crew the fighter here rather than relying on the force-wide commander pass.
+                        // These groups hang off the carrier via addAttached, which that pass does not
+                        // descend into, and when this runs for transport-stage carriers the pass has
+                        // already finished. Without a crew, loadEntities NPEs on getCo().
+                        fighter.assignCommanders();
                         point.addSubForce(fighter);
                         producedInGroup++;
                         generated++;
                     }
                 }
-                // Drop a group that produced nothing because the table dried up. Points live in
-                // both lists now (first = subForce, rest = attached), so check both.
-                if (group.getSubForces().isEmpty() && group.getAttached().isEmpty()) {
-                    carrier.getAttached().remove(group);
+                // Drop a wrapper that produced nothing because the table dried up. Points live in both
+                // lists (first = subForce, rest = attached), so check both. Skipped when there is no
+                // wrapper, since "group" is then the carrier itself.
+                if (wrapInGroups && group.getSubForces().isEmpty() && group.getAttached().isEmpty()) {
+                    groupParent.getAttached().remove(group);
                 }
             }
+            LOGGER.debug("[ForceGen][Fighters] {} (capacity {}): generated {} fighter(s)",
+                  carrier.getModelName(), capacity, generated);
+        }
+        // Summarised after the loop rather than logged per carrier, so a WarShip fleet does not spam
+        // the log; these two counts are what explain an empty result when the option is on.
+        if ((carriersSkippedUnknownModel > 0) || (carriersSkippedNoBays > 0)) {
+            LOGGER.debug("[ForceGen][Fighters] skipped {} carrier(s) with an unresolvable model and"
+                        + " {} with no fighter bays", carriersSkippedUnknownModel, carriersSkippedNoBays);
         }
     }
 
@@ -2446,7 +3271,7 @@ public class ForceDescriptor {
               || (unitType == UnitType.DROPSHIP) || (unitType == UnitType.JUMPSHIP)
               || (unitType == UnitType.SPACE_STATION))) {
             carriers.add(this);
-            return;
+            // Keep going: a DropShip docked to a JumpShip sits beneath it and is a carrier in its own right.
         }
         for (ForceDescriptor sub : subForces) {
             sub.collectCarriers(carriers);
@@ -2454,6 +3279,77 @@ public class ForceDescriptor {
         for (ForceDescriptor attachedForce : attached) {
             attachedForce.collectCarriers(carriers);
         }
+    }
+
+    /**
+     * @return {@code true} when this node is the branch holding the ships the transport stage generated for a force
+     */
+    public boolean isTransportRoot() {
+        return transportRoot;
+    }
+
+    /**
+     * @return the lift the force already owns before this one is generated; {@link ExistingLift#NONE} for the first
+     *       layer of a command or a standalone force
+     */
+    public ExistingLift getExistingLift() {
+        return existingLift;
+    }
+
+    /**
+     * Hands the transport stage the ships an earlier layer of the command already brought, so this one draws only
+     * the lift it still lacks.
+     *
+     * @param existingLift the free bays and docking collars already owned; {@code null} means none
+     */
+    public void setExistingLift(@Nullable ExistingLift existingLift) {
+        this.existingLift = (existingLift == null) ? ExistingLift.NONE : existingLift;
+    }
+
+    /**
+     * @return {@code true} if repeat units are made less likely while this force, and anything under it, is generated
+     *
+     * @author Illiani
+     * @since 0.51.01
+     */
+    public boolean isUnitVarietyBias() {
+        return unitVarietyBias;
+    }
+
+    /**
+     * Asks for repeat units to be made less likely while this force, and anything under it, is generated. Off by
+     * default, so a force generates exactly as the unit tables weigh it; see {@link UnitVariety}.
+     *
+     * @param unitVarietyBias {@code true} to make repeat units less likely
+     *
+     * @author Illiani
+     * @since 0.51.01
+     */
+    public void setUnitVarietyBias(boolean unitVarietyBias) {
+        this.unitVarietyBias = unitVarietyBias;
+    }
+
+    /**
+     * @return the model names of units earlier rolls of the same command already brought; never {@code null}
+     *
+     * @author Illiani
+     * @since 0.51.01
+     */
+    public List<String> getEarlierUnits() {
+        return earlierUnits;
+    }
+
+    /**
+     * Hands generation the units earlier rolls of the same command brought, so that with
+     * {@link #isUnitVarietyBias()} on, this roll is less likely to repeat them.
+     *
+     * @param earlierUnits their model names; {@code null} means none
+     *
+     * @author Illiani
+     * @since 0.51.01
+     */
+    public void setEarlierUnits(@Nullable List<String> earlierUnits) {
+        this.earlierUnits = (earlierUnits == null) ? List.of() : List.copyOf(earlierUnits);
     }
 
     public double getDropshipPct() {
@@ -2480,12 +3376,12 @@ public class ForceDescriptor {
         this.warshipPct = warshipPct;
     }
 
-    public double getCargo() {
-        return cargo;
+    public double getCargoPct() {
+        return cargoPct;
     }
 
-    public void setCargo(double cargo) {
-        this.cargo = cargo;
+    public void setCargoPct(double cargoPct) {
+        this.cargoPct = cargoPct;
     }
 
     public Set<String> getFlags() {
@@ -2543,6 +3439,8 @@ public class ForceDescriptor {
         retVal.weightClass = weightClass;
         retVal.unitType = unitType;
         retVal.movementModes.addAll(movementModes);
+        retVal.infantryClass = infantryClass;
+        retVal.infantryClassChassis = infantryClassChassis;
         retVal.roles.addAll(roles);
         retVal.roles.remove(MissionRole.COMMAND);
         retVal.models.addAll(models);

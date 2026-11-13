@@ -45,6 +45,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import jakarta.annotation.Nullable;
 import megamek.client.bot.Messages;
 import megamek.client.bot.princess.ArtilleryCommandAndControl.SpecialAmmo;
 import megamek.common.Hex;
@@ -52,7 +53,6 @@ import megamek.common.HexTarget;
 import megamek.common.Player;
 import megamek.common.actions.ArtilleryAttackAction;
 import megamek.common.actions.EntityAction;
-import megamek.common.annotations.Nullable;
 import megamek.common.board.BoardLocation;
 import megamek.common.board.Coords;
 import megamek.common.compute.Compute;
@@ -169,7 +169,7 @@ public class ArtilleryTargetingControl {
         // this is the original target hexTarget.
         double totalDamage = calculateDamageValue(damage, hexTarget.getPosition(), shooter, game, owner);
 
-        if (null != hexTarget.getOriginalTarget()) {
+        if (hexTarget.getOriginalTarget() != null) {
             // For leading shots, the expected damage is based on the units in and around the _current_ location,
             // which is stored as the "getOriginalTarget".
             totalDamage += calculateDamageValue(damage,
@@ -1723,7 +1723,7 @@ public class ArtilleryTargetingControl {
                 // type's rack size
                 int damage;
                 Mounted<?> weapon = aaa.getEntity(operator.getGame()).getEquipment(aaa.getWeaponId());
-                if (null == weapon) {
+                if (weapon == null) {
                     // The weaponId couldn't get us a weapon; probably a bomb Arrow IV dropped on a
                     // prior turn.
                     BombType bombType = BombType.createBombByType(BombType.BombTypeEnum.ARROW);

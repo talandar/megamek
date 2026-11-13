@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024-2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2024-2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -33,18 +33,23 @@
 
 package megamek.client;
 
+import java.io.File;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.Vector;
+import java.util.function.Consumer;
 import javax.swing.SwingUtilities;
 
+import jakarta.annotation.Nullable;
 import megamek.MMConstants;
 import megamek.SuiteConstants;
 import megamek.Version;
 import megamek.client.generator.RandomUnitGenerator;
 import megamek.client.ui.Base64Image;
+import megamek.client.ui.Messages;
+import megamek.client.ui.util.RefusedConnectionNotifier;
 import megamek.common.Player;
 import megamek.common.board.Board;
 import megamek.common.enums.GamePhase;
@@ -53,6 +58,7 @@ import megamek.common.event.GameToastEvent;
 import megamek.common.event.player.GamePlayerChangeEvent;
 import megamek.common.event.player.GamePlayerChatEvent;
 import megamek.common.event.player.GamePlayerDisconnectedEvent;
+import megamek.common.event.player.GamePlayerPingEvent;
 import megamek.common.force.Force;
 import megamek.common.game.GameLog;
 import megamek.common.game.InGameObject;
@@ -85,6 +91,8 @@ public abstract class AbstractClient implements IClient {
     protected boolean connected = false;
     protected boolean disconnectFlag = false;
     protected boolean awaitingSave = false;
+    /** One-shot listener for the asynchronous local save; see {@link #setSaveCompletionCallback(Consumer)}. */
+    private Consumer<File> saveCompletionCallback;
     protected final String host;
     protected final int port;
     private ConnectionHandler packetUpdate;
@@ -354,6 +362,19 @@ public abstract class AbstractClient implements IClient {
         return false;
     }
 
+    /**
+     * Whether this client puts up dialogs for notices about other players, such as someone being refused for running
+     * a different version. Only a person at a screen should see those, so bots never do.
+     *
+     * @return {@code true} if this client shows player notice dialogs, otherwise {@code false}
+     *
+     * @author Illiani
+     * @since 0.51.01
+     */
+    protected boolean showsPlayerNoticeDialogs() {
+        return !isBot();
+    }
+
     @Override
     public int getPort() {
         return port;
@@ -475,17 +496,25 @@ public abstract class AbstractClient implements IClient {
                     disconnected();
                     break;
                 case SERVER_VERSION_CHECK:
-                    send(new Packet(PacketCommand.CLIENT_VERSIONS, SuiteConstants.VERSION));
+                    // The name rides along so that, if the server refuses us, the host can be told who it was. Servers
+                    // older than 0.51.01 read only the version and ignore it.
+                    send(new Packet(PacketCommand.CLIENT_VERSIONS, SuiteConstants.VERSION, getName()));
                     break;
                 case ILLEGAL_CLIENT_VERSION:
                     final Version serverVersion = (Version) packet.getObject(0);
-                    logger.errorDialog("Connection Failure: Version Difference",
-                          "Failed to connect to the server at {} because of version differences. " +
-                                "Cannot connect to a server running {} with a {} install.",
-                          getHost(),
-                          serverVersion,
-                          SuiteConstants.VERSION);
+                    logger.errorDialog(Messages.getString("AbstractClient.versionRefused.title"),
+                          Messages.getString("AbstractClient.versionRefused.message",
+                                getHost(),
+                                serverVersion,
+                                SuiteConstants.VERSION));
                     disconnected();
+                    break;
+                case PLAYER_REFUSED_DIFFERENT_VERSION:
+                    if (showsPlayerNoticeDialogs()) {
+                        RefusedConnectionNotifier.showPlayerDialog(packet.getObject(0),
+                              (Version) packet.getObject(1),
+                              (Version) packet.getObject(2));
+                    }
                     break;
                 case LOCAL_PN:
                     localPlayerNumber = packet.getIntValue(0);
@@ -539,6 +568,11 @@ public abstract class AbstractClient implements IClient {
                           (GameToastEvent.Level) packet.getObject(0),
                           (String) packet.getObject(1),
                           packet.getIntValue(2)));
+                    break;
+                case PLAYER_PING:
+                    getGame().fireGameEvent(new GamePlayerPingEvent(this,
+                          packet.getIntValue(0),
+                          packet.getBooleanValue(1)));
                     break;
                 default:
                     return false;
@@ -607,6 +641,39 @@ public abstract class AbstractClient implements IClient {
     public boolean isAwaitingSave() {
         return awaitingSave;
     }
+
+    /**
+     * Registers a one-shot callback to be run once a requested local save has actually landed on disk.
+     *
+     * <p>Saving is asynchronous in MegaMek: the request goes to the server as a chat command, the server serializes
+     * the game, and the resulting file is streamed back to this client, which then writes it out. A caller that needs
+     * the finished file - the bug report packager, for instance - therefore cannot simply read it after asking for
+     * the save, because at that moment it does not yet exist.</p>
+     *
+     * <p>The callback is cleared as it fires, so it runs at most once per registration. Registering a new callback
+     * replaces any previous one.</p>
+     *
+     * @param saveCompletionCallback invoked with the saved file, or with {@code null} if the save could not be
+     *                               written; pass {@code null} to cancel a pending registration
+     */
+    public void setSaveCompletionCallback(@Nullable Consumer<File> saveCompletionCallback) {
+        this.saveCompletionCallback = saveCompletionCallback;
+    }
+
+    /**
+     * Runs and clears any registered save-completion callback. Safe to call when none is registered, and safe to call
+     * more than once for a single save.
+     *
+     * @param savedFile the file that was written, or {@code null} if the save failed
+     */
+    protected void fireSaveCompleted(@Nullable File savedFile) {
+        Consumer<File> callback = saveCompletionCallback;
+        saveCompletionCallback = null;
+        if (callback != null) {
+            callback.accept(savedFile);
+        }
+    }
+
     /**
      * Custom connection Listener for AbstractClient
      *

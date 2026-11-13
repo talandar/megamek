@@ -41,6 +41,7 @@ import java.util.Objects;
 import java.util.Optional;
 import javax.swing.JFrame;
 
+import jakarta.annotation.Nullable;
 import megamek.client.AbstractClient;
 import megamek.client.Client;
 import megamek.client.bot.AIType;
@@ -51,7 +52,6 @@ import megamek.client.bot.princess.BehaviorSettingsFactory;
 import megamek.client.bot.ui.swing.BotGUI;
 import megamek.codeUtilities.StringUtility;
 import megamek.common.Player;
-import megamek.common.annotations.Nullable;
 import megamek.common.game.Game;
 
 /**
@@ -64,18 +64,18 @@ public class AddBotUtil {
     public static final String COMMAND = "replacePlayer";
     public static final String USAGE = """
           Replaces a player who is a ghost with a bot.\
-          
+
           Usage /replacePlayer <-b:Princess> <-c:Config> <-v:Verbosity> \
           <-p:>name.\
-          
+
             <-b> Specifies use if Princess. \
-          
+
             <-c> Specifies a saved configuration to be used by Princess.  If left out\
            DEFAULT will be used.\
-          
+
             <-v> Specifies the verbosity level for Princess \
           (DEBUG/INFO/WARNING/ERROR).\
-          
+
             <-p> Specifies the player name.  The '-p' is only required when the '-c' \
           or '-v' parameters are also used.""";
 
@@ -150,7 +150,7 @@ public class AddBotUtil {
 
         }
 
-        if (null == target) {
+        if (target == null) {
             results.add("No player with the name '" + playerName + "'.");
             return concatResults();
         }
@@ -171,7 +171,7 @@ public class AddBotUtil {
         if (!StringUtility.isNullOrBlank(configName)) {
             final BehaviorSettings behavior = BehaviorSettingsFactory.getInstance()
                   .getBehavior(configName.toString());
-            if (null != behavior) {
+            if (behavior != null) {
                 botClient.setBehaviorSettings(behavior);
             } else {
                 results.add("Unrecognized Behavior Setting: '" + configName + "'.  Using DEFAULT.");
@@ -205,6 +205,23 @@ public class AddBotUtil {
 
     public @Nullable BotClient replaceGhostWithBot(final BehaviorSettings behavior, final String playerName,
           final Client client, StringBuilder message) {
+        return replaceGhostWithBot(AIType.PRINCESS, behavior, playerName, client, message);
+    }
+
+    /**
+     * Replaces a ghost player with a bot of the given AI type.
+     *
+     * @param aiType     which bot implementation to stand up in the ghost's place
+     * @param behavior   the behavior settings to give it
+     * @param playerName the ghost player to replace
+     * @param client     the client whose game the ghost is in
+     * @param message    receives a human-readable result, whether or not the replacement succeeded
+     *
+     * @return the connected bot, or {@code null} if the player was not a ghost or the bot failed to connect
+     */
+    public @Nullable BotClient replaceGhostWithBot(final AIType aiType, final BehaviorSettings behavior,
+          final String playerName, final Client client, StringBuilder message) {
+        Objects.requireNonNull(aiType);
         Objects.requireNonNull(client);
         Objects.requireNonNull(behavior);
 
@@ -227,7 +244,7 @@ public class AddBotUtil {
         }
 
         final Player target = possible.get();
-        final BotClient botClient = BotFactory.createBot(AIType.PRINCESS, target.getName(), host, port);
+        final BotClient botClient = BotFactory.createBot(aiType, target.getName(), host, port);
         botClient.setBehaviorSettings(behavior);
 
         boolean connected;

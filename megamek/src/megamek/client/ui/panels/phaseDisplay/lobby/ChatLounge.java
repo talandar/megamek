@@ -91,11 +91,12 @@ import javax.swing.tree.TreeNode;
 import javax.swing.tree.TreePath;
 import javax.swing.tree.TreeSelectionModel;
 
+import jakarta.annotation.Nullable;
 import megamek.MMConstants;
+import megamek.MegaMek;
 import megamek.SuiteConstants;
 import megamek.client.AbstractClient;
 import megamek.client.Client;
-import megamek.client.bot.AIType;
 import megamek.client.bot.BotClient;
 import megamek.client.bot.BotFactory;
 import megamek.client.bot.princess.BehaviorSettings;
@@ -110,6 +111,7 @@ import megamek.client.ui.clientGUI.ClientGUI;
 import megamek.client.ui.clientGUI.CloseAction;
 import megamek.client.ui.clientGUI.GUIPreferences;
 import megamek.client.ui.clientGUI.IMapSettingsObserver;
+import megamek.client.ui.clientGUI.UnitRecipients;
 import megamek.client.ui.clientGUI.boardview.BoardView;
 import megamek.client.ui.clientGUI.boardview.RulerDialog;
 import megamek.client.ui.clientGUI.boardview.toolTip.TWBoardViewTooltip;
@@ -130,6 +132,7 @@ import megamek.client.ui.enums.DialogResult;
 import megamek.client.ui.panels.phaseDisplay.AbstractPhaseDisplay;
 import megamek.client.ui.panels.phaseDisplay.lobby.PlayerTable.PlayerTableModel;
 import megamek.client.ui.panels.phaseDisplay.lobby.sorters.*;
+import megamek.client.ui.preferences.JWindowPreference;
 import megamek.client.ui.util.ScalingPopup;
 import megamek.client.ui.util.UIUtil;
 import megamek.client.ui.util.UIUtil.FixedXPanel;
@@ -138,12 +141,12 @@ import megamek.client.ui.widget.SkinSpecification;
 import megamek.common.Configuration;
 import megamek.common.Player;
 import megamek.common.TechConstants;
-import megamek.common.annotations.Nullable;
 import megamek.common.autoResolve.converter.MMSetupForces;
 import megamek.common.board.Board;
 import megamek.common.board.BoardDimensions;
 import megamek.common.board.postprocess.TWBoardTransformer;
 import megamek.common.enums.GamePhase;
+import megamek.common.enums.NeuralInterfaceMode;
 import megamek.common.equipment.BombLoadout;
 import megamek.common.event.GameCFREvent;
 import megamek.common.event.GamePhaseChangeEvent;
@@ -219,6 +222,8 @@ public class ChatLounge extends AbstractPhaseDisplay
     private final FixedYPanel panUnitInfo = new FixedYPanel();
     private final JButton butAdd = new JButton(Messages.getString("ChatLounge.butLoad"));
     private final JButton butArmy = new JButton(Messages.getString("ChatLounge.butArmy"));
+    private final JButton butC3Manager = new JButton(Messages.getString("ChatLounge.butC3Manager"));
+    private JPanel panUnitInfoAdd;
     private final JButton butSkills = new JButton(Messages.getString("ChatLounge.butSkills"));
     private final JButton butNames = new JButton(Messages.getString("ChatLounge.butNames"));
     private final JButton butLoadList = new JButton(Messages.getString("ChatLounge.butLoadList"));
@@ -327,6 +332,30 @@ public class ChatLounge extends AbstractPhaseDisplay
     private transient MekTableSorter activeSorter;
     private final transient ArrayList<MekTableSorter> unitSorters = new ArrayList<>();
     private final transient ArrayList<MekTableSorter> bvSorters = new ArrayList<>();
+
+    /** Shows the C3 manager button only while C3-equipped units are in the lobby. */
+    private void updateC3ManagerButton(java.util.List<Entity> allEntities) {
+        boolean anyC3Units = false;
+        for (Entity entity : allEntities) {
+            if (entity.hasAnyC3System()) {
+                anyC3Units = true;
+                break;
+            }
+        }
+        boolean currentlyShown = butC3Manager.getParent() != null;
+        if (anyC3Units == currentlyShown) {
+            return;
+        }
+        if (anyC3Units) {
+            panUnitInfoAdd.setLayout(new GridLayout(3, 1, 2, 2));
+            panUnitInfoAdd.add(butC3Manager);
+        } else {
+            panUnitInfoAdd.setLayout(new GridLayout(2, 1, 2, 2));
+            panUnitInfoAdd.remove(butC3Manager);
+        }
+        panUnitInfoAdd.revalidate();
+        panUnitInfoAdd.repaint();
+    }
 
     private final JButton butAddY = new JButton(Messages.getString("ChatLounge.butAdd"));
     private final JButton butAddX = new JButton(Messages.getString("ChatLounge.butAdd"));
@@ -532,9 +561,7 @@ public class ChatLounge extends AbstractPhaseDisplay
         CamoChooserDialog ccd = new CamoChooserDialog(clientgui.getFrame(), player.getCamouflage());
         try {
             java.util.List<Entity> playerEntities = game().getPlayerEntities(player, false);
-            if (!playerEntities.isEmpty()) {
-                ccd.setDisplayedEntity(CollectionUtil.anyOneElement(playerEntities));
-            }
+            ccd.setDisplayedEntities(playerEntities);
             // If the dialog was canceled or nothing selected, do nothing
             if (!ccd.showDialog().isConfirmed()) {
                 return;
@@ -674,9 +701,13 @@ public class ChatLounge extends AbstractPhaseDisplay
         butAdd.setActionCommand(CL_ACTION_COMMAND_LOAD_MEK);
         butArmy.setEnabled(mscLoaded);
 
+        butC3Manager.setToolTipText(Messages.getString("ChatLounge.butC3Manager.tooltip"));
+        butC3Manager.addActionListener(event -> new C3NetworkManagerDialog(this).setVisible(true));
+
         panUnitInfo.setBorder(BorderFactory.createTitledBorder(Messages.getString("ChatLounge.name.unitSetup")));
         panUnitInfo.setLayout(new BoxLayout(panUnitInfo, BoxLayout.PAGE_AXIS));
-        JPanel panUnitInfoAdd = new JPanel(new GridLayout(2, 1, 2, 2));
+        // The C3 manager button joins this panel only while C3 units are in the lobby (updateC3ManagerButton)
+        panUnitInfoAdd = new JPanel(new GridLayout(2, 1, 2, 2));
         panUnitInfoAdd.setBorder(new EmptyBorder(0, 0, 2, 1));
         panUnitInfoAdd.add(butAdd);
         panUnitInfoAdd.add(butArmy);
@@ -997,6 +1028,15 @@ public class ChatLounge extends AbstractPhaseDisplay
             previewPanel.add(previewBV.getComponent(true));
             boardPreviewW.add(previewPanel);
             boardPreviewW.setSize(clientgui.getFrame().getWidth() / 2, clientgui.getFrame().getHeight() / 2);
+            // remember the preview window's size and position between sessions, like the standard dialogs do
+            // (the preferences are written when MegaMek exits normally)
+            boardPreviewW.setName("BoardPreviewDialog");
+            try {
+                MegaMek.getMMPreferences().forClass(ChatLounge.class)
+                      .manage(new JWindowPreference(boardPreviewW));
+            } catch (Exception exception) {
+                LOGGER.warn(exception, "Could not set up size/position memory for the board preview window");
+            }
 
             String closeAction = "closeAction";
             final KeyStroke escape = KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0);
@@ -1499,7 +1539,12 @@ public class ChatLounge extends AbstractPhaseDisplay
         java.util.List<Integer> enIds = getSelectedEntities().stream().map(Entity::getId).toList();
         mekModel.clearData();
         ArrayList<Entity> allEntities = new ArrayList<>(clientgui.getClient().getEntitiesVector());
-        allEntities.sort(activeSorter);
+        // Whatever the player is sorting by, a train stays together (the choice is applied to the tractor and its
+        // trailers follow it) and a C3 network stays together in hierarchy order - the branch glyphs drawn in
+        // front of members rely on a member sitting directly under its master.
+        allEntities.sort(MekTableSorter.keepingC3NetworksTogether(allEntities,
+              MekTableSorter.keepingCarriedUnitsTogether(activeSorter)));
+        updateC3ManagerButton(allEntities);
 
         boolean localUnits = false;
         var opts = clientgui.getClient().getGame().getOptions();
@@ -1518,8 +1563,9 @@ public class ChatLounge extends AbstractPhaseDisplay
                 entity.getCrew().clearOptions(PilotOptions.EDGE_ADVANTAGES);
             }
 
-            if (!opts.booleanOption(OptionsConstants.RPG_MANEI_DOMINI)) {
+            if (!NeuralInterfaceMode.from(opts).allowsImplants()) {
                 entity.getCrew().clearOptions(PilotOptions.MD_ADVANTAGES);
+                entity.getCrew().clearOptions(PilotOptions.EI_ADVANTAGES);
             }
 
             if (!opts.booleanOption(OptionsConstants.ADVANCED_STRATOPS_PARTIAL_REPAIRS)) {
@@ -1579,11 +1625,32 @@ public class ChatLounge extends AbstractPhaseDisplay
                 tablePlayers.addRowSelectionInterval(row, row);
             }
         }
-        // If no one is selected now (and the table isn't empty), select the first
-        // player
         if ((tablePlayers.getSelectedRowCount() == 0) && (tablePlayers.getRowCount() > 0)) {
-            tablePlayers.addRowSelectionInterval(0, 0);
+            selectLocalPlayerRow();
         }
+    }
+
+    /**
+     * Highlights the local player in the player table when nobody is highlighted.
+     *
+     * <p>The table lists players in the order they joined, so its first row is the host. Somebody who has just
+     * connected wants their own name highlighted, not the host's: Team, Camo, Set Up Player and the unit choosers
+     * all act on the highlighted player, and none of them should open pointed at somebody else.</p>
+     */
+    private void selectLocalPlayerRow() {
+        // the server names this client's player before it sends the phase that builds the lobby, so the local
+        // player is always known here - the selection listener below relies on the same thing
+        Player local = localPlayer();
+        for (int row = 0; row < playerModel.getRowCount(); row++) {
+            if (playerModel.getPlayerAt(row).getId() == local.getId()) {
+                tablePlayers.addRowSelectionInterval(row, row);
+                LOGGER.info("[GMAddUnit] lobby highlighted {} (row {}) as the default player", local.getName(), row);
+                return;
+            }
+        }
+        tablePlayers.addRowSelectionInterval(0, 0);
+        LOGGER.warn("[GMAddUnit] {} is not in the player table yet, so the lobby highlighted row 0 ({}) instead",
+              local.getName(), playerModel.getPlayerAt(0).getName());
     }
 
     /**
@@ -1698,7 +1765,9 @@ public class ChatLounge extends AbstractPhaseDisplay
         if (trailer.getTowedBy() == Entity.NONE) {
             return;
         }
-        Entity tractor = game().getEntity(trailer.getTowedBy());
+        // Detaching mid-train affects the whole train, so work from the tractor heading it rather than from the
+        // trailer immediately in front, which would leave the rest of the train out of the update.
+        Entity tractor = game().getEntity(trailer.getTractor());
         disconnectTrain(tractor, trailer, updateCandidates);
     }
 
@@ -1726,7 +1795,15 @@ public class ChatLounge extends AbstractPhaseDisplay
 
     private void disconnectTrain(Entity tractor, Entity trailer, Collection<Entity> updateCandidates) {
         if (tractor != null && trailer != null) {
-            List<Integer> otherTowedUnitIds = tractor.getAllTowedUnits();
+            // An off board train stays hooked up. There is no board position to drop a trailer at, and the train is
+            // the only thing holding the trailer's place off the map edge.
+            if (tractor.isOffBoard() || trailer.isOffBoard()) {
+                LobbyErrors.showNoDetachOffBoard(clientgui.getFrame());
+                return;
+            }
+            // Copy the ids: disconnectUnit drops the detached trailers from this list as it works, and walking
+            // the live view afterwards fails with a ConcurrentModificationException.
+            List<Integer> otherTowedUnitIds = new ArrayList<>(tractor.getAllTowedUnits());
             tractor.disconnectUnit(trailer.getId());
             updateCandidates.add(trailer);
             updateCandidates.add(tractor);
@@ -1846,7 +1923,7 @@ public class ChatLounge extends AbstractPhaseDisplay
 
     public void configPlayer() {
         Client c = getSelectedClient();
-        if (null == c) {
+        if (c == null) {
             return;
         }
 
@@ -1863,16 +1940,43 @@ public class ChatLounge extends AbstractPhaseDisplay
      * Pop up the dialog to load a mek
      */
     private void addUnit() {
-        Client c = getSelectedClient();
         clientgui.getMekSelectorDialog().updateOptionValues();
-        clientgui.getMekSelectorDialog().setPlayerFromClient(c);
+        clientgui.getMekSelectorDialog().setPlayerFrom(permittedHighlightedPlayer());
         clientgui.getMekSelectorDialog().setVisible(true);
     }
 
     private void createArmy() {
-        Client c = getSelectedClient();
-        clientgui.getRandomArmyDialog().setPlayerFromClient(c);
+        clientgui.getRandomArmyDialog().setPlayerFrom(permittedHighlightedPlayer());
         clientgui.getRandomArmyDialog().setVisible(true);
+    }
+
+    /**
+     * The highlighted player, when the local player may add units to them.
+     *
+     * <p>Somebody who has just connected may well find the host highlighted, because the table lists players in
+     * the order they joined. Handing the host to a unit chooser would make it open on the host - and units picked
+     * without a second look would land in the host's force. So the highlighted player is passed on only when the
+     * local player may give them units; otherwise nobody is asked for and the chooser stays on the person using
+     * it.</p>
+     *
+     * @return the highlighted player when units may be added to them, otherwise {@code null}
+     */
+    private @Nullable Player permittedHighlightedPlayer() {
+        Player highlighted = getSelectedPlayer();
+        if (highlighted == null) {
+            LOGGER.info("[GMAddUnit] {} pressed a unit button with nobody highlighted; the chooser stays where it was",
+                  localPlayer().getName());
+            return null;
+        }
+        if (!mayActForPlayer(highlighted)) {
+            LOGGER.info("[GMAddUnit] {} pressed a unit button with {} highlighted, whom they may not add units to; "
+                        + "the chooser stays on {}", localPlayer().getName(), highlighted.getName(),
+                  localPlayer().getName());
+            return null;
+        }
+        LOGGER.info("[GMAddUnit] {} pressed a unit button with {} highlighted; asking the chooser for them",
+              localPlayer().getName(), highlighted.getName());
+        return highlighted;
     }
 
     public void loadRandomNames() {
@@ -2062,31 +2166,35 @@ public class ChatLounge extends AbstractPhaseDisplay
                 toggleCompact();
             } else if (ev.getSource().equals(butLoadList)) {
                 // Allow the player to replace their current list of entities with a list from a file.
-                Client c = getSelectedClient();
-                if (c == null) {
+                Player selectedPlayer = getSelectedPlayer();
+                if ((selectedPlayer == null) || !mayActForPlayer(selectedPlayer)) {
                     clientgui.doAlertDialog(Messages.getString("ChatLounge.ImproperCommand"),
                           Messages.getString("ChatLounge.SelectBotOrPlayer"));
                     return;
                 }
-                clientgui.loadListFile(c.getLocalPlayer());
+                clientgui.loadListFile(selectedPlayer);
 
             } else if (ev.getSource().equals(butSaveList) || ev.getSource().equals(butPrintList)) {
                 // Allow the player to save their current
                 // list of entities to a file.
-                Client c = getSelectedClient();
-                if (c == null) {
+                Player selectedPlayer = getSelectedPlayer();
+                if ((selectedPlayer == null) || !mayActForPlayer(selectedPlayer)) {
                     clientgui.doAlertDialog(Messages.getString("ChatLounge.ImproperCommand"),
                           Messages.getString("ChatLounge.SelectBotOrPlayer"));
                     return;
                 }
-                ArrayList<Entity> entities = c.getGame().getPlayerEntities(c.getLocalPlayer(), false);
+                ArrayList<Entity> entities = unitsInForceTreeOrder(selectedPlayer);
                 for (Entity entity : entities) {
                     entity.setForceString(game().getForces().forceStringFor(entity));
                 }
-                if (ev.getSource().equals(butSaveList)) {
-                    clientgui.saveListFile(entities, c.getLocalPlayer().getName());
-                } else {
-                    clientgui.printList(entities, (JButton) ev.getSource());
+                try {
+                    if (ev.getSource().equals(butSaveList)) {
+                        clientgui.saveListFile(entities, selectedPlayer.getName());
+                    } else {
+                        clientgui.printList(entities, (JButton) ev.getSource());
+                    }
+                } finally {
+                    clearForceStrings(entities);
                 }
 
             } else if (ev.getSource().equals(butAddBot)) {
@@ -2096,7 +2204,7 @@ public class ChatLounge extends AbstractPhaseDisplay
                 removeBot();
 
             } else if (ev.getSource().equals(butShowUnitID)) {
-                PreferenceManager.getClientPreferences().setShowUnitId(butShowUnitID.isSelected());
+                PreferenceManager.getClientPreferences().setLobbyShowUnitId(butShowUnitID.isSelected());
                 mekModel.refreshCells();
                 repaint();
 
@@ -2459,7 +2567,11 @@ public class ChatLounge extends AbstractPhaseDisplay
             victoryConditionsDialog = new VictoryConditionsDialog(clientgui);
         }
         victoryConditionsDialog.refreshLobbyState();
-        if (victoryConditionsDialog.showDialog() == DialogResult.CONFIRMED) {
+        DialogResult dialogResult = victoryConditionsDialog.showDialog();
+        // window sizes and positions normally persist only on a clean exit; mission setup is worth keeping
+        // even when the process is killed, so save the preferences when this dialog closes
+        MegaMek.getMMPreferences().saveToFile(SuiteConstants.MM_PREFERENCES_FILE);
+        if (dialogResult == DialogResult.CONFIRMED) {
             Vector<IBasicOption> changedOptions = victoryConditionsDialog.getChangedVictoryOptions();
             if (!changedOptions.isEmpty()) {
                 clientgui.getClient().sendGameOptions(victoryConditionsDialog.getPassword(), changedOptions);
@@ -2491,7 +2603,8 @@ public class ChatLounge extends AbstractPhaseDisplay
         var bcd = new BotConfigDialog(clientgui.getFrame(),
               bot.getLocalPlayer().getName(),
               bot.getBehaviorSettings(),
-              clientgui);
+              clientgui,
+              bot.getAIType());
         bcd.setVisible(true);
         if (bcd.getResult() == DialogResult.CONFIRMED) {
             bot.setBehaviorSettings(bcd.getBehaviorSettings());
@@ -2690,6 +2803,66 @@ public class ChatLounge extends AbstractPhaseDisplay
         for (AbstractClient botClient : clientgui.getLocalBots().values()) {
             botClient.sendDone(done);
         }
+    }
+
+    /**
+     * Returns the player's units in the order the force tree shows them, so a saved unit list reloads with the forces
+     * and units in the order they were arranged (issue #9290).
+     *
+     * @param player the player whose units are saved or printed
+     *
+     * @return the player's units in force tree order
+     */
+    private ArrayList<Entity> unitsInForceTreeOrder(Player player) {
+        List<Entity> units = game().getPlayerEntities(player, false);
+        ArrayList<Entity> orderedUnits = new ArrayList<>(game().getForces().sortedInTreeOrder(units));
+        LOGGER.debug("[ForceTree] Saving {} units of {} in force tree order", orderedUnits.size(), player.getName());
+        return orderedUnits;
+    }
+
+    /**
+     * Clears the force names stamped onto units for writing a unit list. A stamp left behind takes precedence over
+     * the live force tree the next time the unit is written to a file, so a force renamed since would come back with
+     * its old name (issue #9290).
+     *
+     * @param units the units whose stamps are cleared
+     */
+    private static void clearForceStrings(List<Entity> units) {
+        for (Entity unit : units) {
+            unit.setForceString("");
+        }
+    }
+
+    /**
+     * Whether the local player may act on the given player's force.
+     *
+     * <p>The same rule the unit choosers use, asked here as well: their chooser only offers players it is willing
+     * to act for, so the rule is enforced by what is in the list. The unit list buttons and the unit choosers act on
+     * whoever is highlighted in the player table, which is anyone at all, so they have to ask.</p>
+     *
+     * @param player The player whose force is to be acted on
+     *
+     * @return {@code true} when the local player may add units to, load or save that player's force
+     */
+    private boolean mayActForPlayer(Player player) {
+        return UnitRecipients.mayAddUnitsTo(localPlayer(), player, clientgui.getLocalBots().keySet());
+    }
+
+    /**
+     * The player highlighted in the player table, whoever is running them.
+     *
+     * <p>Separate from {@link #getSelectedClient()} because most of what the lobby does to a player needs only
+     * the player: units are owned by a player and sent over this machine's own connection. A remote human has no
+     * client here, so anything that asks for one gets nothing back and quietly does the work for the local player
+     * instead.</p>
+     *
+     * @return the selected player, or {@code null} when no row is selected
+     */
+    @Nullable Player getSelectedPlayer() {
+        if (tablePlayers.getSelectedRowCount() == 0) {
+            return null;
+        }
+        return playerModel.getPlayerAt(tablePlayers.getSelectedRow());
     }
 
     Client getSelectedClient() {
@@ -3500,7 +3673,7 @@ public class ChatLounge extends AbstractPhaseDisplay
     @Override
     public void preferenceChange(PreferenceChangeEvent e) {
         switch (e.getName()) {
-            case ClientPreferences.SHOW_UNIT_ID:
+            case ClientPreferences.LOBBY_SHOW_UNIT_ID:
                 setButUnitIDState();
                 mekModel.refreshCells();
                 refreshTree();
@@ -3517,10 +3690,10 @@ public class ChatLounge extends AbstractPhaseDisplay
         }
     }
 
-    /** Silently adapts the state of the "Show IDs" button to the Client preferences. */
+    /** Silently adapts the state of the "Show IDs" button to the lobby preference. */
     private void setButUnitIDState() {
         butShowUnitID.removeActionListener(lobbyListener);
-        butShowUnitID.setSelected(PreferenceManager.getClientPreferences().getShowUnitId());
+        butShowUnitID.setSelected(PreferenceManager.getClientPreferences().getLobbyShowUnitId());
         butShowUnitID.addActionListener(lobbyListener);
     }
 

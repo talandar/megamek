@@ -44,9 +44,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.Vector;
 
+import jakarta.annotation.Nullable;
 import megamek.client.ui.clientGUI.calculationReport.CalculationReport;
 import megamek.common.*;
-import megamek.common.annotations.Nullable;
 import megamek.common.battleArmor.BattleArmorHandlesTank;
 import megamek.common.bays.BattleArmorBay;
 import megamek.common.bays.Bay;
@@ -65,6 +65,7 @@ import megamek.common.equipment.*;
 import megamek.common.equipment.enums.FuelType;
 import megamek.common.equipment.enums.MiscTypeFlag;
 import megamek.common.exceptions.LocationFullException;
+import megamek.common.game.Game;
 import megamek.common.interfaces.ILocationExposureStatus;
 import megamek.common.options.OptionsConstants;
 import megamek.common.planetaryConditions.PlanetaryConditions;
@@ -91,6 +92,7 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
               && getGame().getOptions()
               .booleanOption(OptionsConstants.ADVANCED_GROUND_MOVEMENT_VEHICLES_CAN_EJECT);
     }
+
     protected boolean m_bHasNoTurret = false;
     protected boolean m_bTurretLocked = false;
     protected boolean m_bTurretJammed = false;
@@ -102,6 +104,7 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
     private int m_nTurretOffset = 0;
     private int m_nDualTurretOffset = 0;
     private int m_nStunnedTurns = 0;
+    private boolean crashedThisTurn = false;
     private boolean immobilized = false;
     private boolean markForImmobilize = false;
     private int burningLocations = 0;
@@ -156,8 +159,8 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
     private transient FortifyState fortifyState = new FortifyState();
 
     /**
-     * The rubble hex this vehicle is currently clearing with its bulldozer, or {@code null} if it is not clearing (TacOps). The
-     * vehicle must remain in this hex for the duration; if displaced or destroyed the work is abandoned.
+     * The rubble hex this vehicle is currently clearing with its bulldozer, or {@code null} if it is not clearing
+     * (TacOps). The vehicle must remain in this hex for the duration; if displaced or destroyed the work is abandoned.
      */
     private Coords rubbleClearTarget = null;
     /** Turns of bulldozer clearing banked so far against {@link #rubbleClearTurnsRequired}. */
@@ -397,7 +400,7 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
             mp = Math.max(0, mp - getCargoMpReduction(this));
         }
 
-        if (!mpCalculationSetting.ignoreWeather() && (null != game)) {
+        if (!mpCalculationSetting.ignoreWeather() && (game != null)) {
             PlanetaryConditions conditions = game.getPlanetaryConditions();
             int weatherMod = conditions.getMovementMods(this);
             mp = Math.max(mp + weatherMod, 0);
@@ -435,25 +438,28 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
             mp = applyGravityEffectsOnMP(mp);
         }
 
-        // If the unit is towing trailers, adjust its walkMP, TW p205
-        if (!mpCalculationSetting.ignoreCargo() && (null != game) && !getAllTowedUnits().isEmpty()) {
-            double trainWeight = getWeight();
-            int lowestSuspensionFactor = getSuspensionFactor();
-            // Add up the trailers
+        // If the unit is towing trailers, the load slows it down (TM, Tractors).
+        if (!mpCalculationSetting.ignoreCargo() && (game != null) && !getAllTowedUnits().isEmpty()) {
+            double trailerWeight = 0;
             for (int id : getAllTowedUnits()) {
-                Entity tr = game.getEntity(id);
-                if (tr == null) {
-                    // this isn't supposed to happen, but it can in rare cases when tr is destroyed
+                Entity towedUnit = game.getEntity(id);
+                if (towedUnit == null) {
+                    // this isn't supposed to happen, but it can in rare cases when the trailer is destroyed
                     continue;
                 }
-                if (tr instanceof Tank tankTrailer) {
-                    if (tankTrailer.getSuspensionFactor() < lowestSuspensionFactor) {
-                        lowestSuspensionFactor = tankTrailer.getSuspensionFactor();
-                    }
-                }
-                trainWeight += tr.getWeight();
+                trailerWeight += towedUnit.getWeight();
             }
-            mp = (int) ((getEngine().getRating() + lowestSuspensionFactor) / trainWeight);
+
+            // "if the Trailers weigh up to a quarter of the Tractor's own weight, the Tractor must subtract 3 from
+            // its Cruising MP or half of its Cruising MP (round down), whichever is less. If the Trailers weigh more
+            // than a quarter of the Tractor's tonnage, the Tractor may only move at half its Cruising MP (round
+            // down)." Flank MP follows from the reduced Cruising MP in getRunMP, which already rounds .5 up.
+            int halvedCruisingMP = (int) Math.floor(mp / 2.0);
+            if (trailerWeight > (getWeight() / 4.0)) {
+                mp = halvedCruisingMP;
+            } else {
+                mp -= Math.min(3, halvedCruisingMP);
+            }
         }
 
         // Improved Magnetic Pulse (iATM IMP) missile movement reduction (IO IMP rules)
@@ -879,22 +885,7 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
                           (hex.terrainLevel(Terrains.GEYSER) == 2);
                 }
             case HOVER:
-                if (isCrossCountry && !isSuperHeavy()) {
-                    return (hex.terrainLevel(Terrains.MAGMA) > 1);
-                }
-
-                if (!isSuperHeavy()) {
-                    return (hex.containsTerrain(Terrains.WOODS) && !hexHasRoad && !scoutBikeIntoLightWoods) ||
-                          (hex.containsTerrain(Terrains.JUNGLE) && !hexHasRoad) ||
-                          (hex.terrainLevel(Terrains.MAGMA) > 1) ||
-                          ((hex.terrainLevel(Terrains.ROUGH) > 1) && !hexHasRoad) ||
-                          ((hex.terrainLevel(Terrains.RUBBLE) > 5) && !hexHasRoad);
-                } else {
-                    return (hex.containsTerrain(Terrains.WOODS) && !hexHasRoad) ||
-                          (hex.containsTerrain(Terrains.JUNGLE) && !hexHasRoad) ||
-                          (hex.terrainLevel(Terrains.MAGMA) > 1);
-                }
-
+                return isHoverTerrainProhibited(hex);
             case NAVAL:
             case HYDROFOIL:
                 // Can only deploy under a bridge if there is sufficient clearance.
@@ -911,14 +902,54 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
                 }
                 return (hex.terrainLevel(Terrains.WATER) <= 0);
             case WIGE:
-                return isLocationProhibitedWiGE(c, currElevation);
+                return isLocationProhibitedWiGE(hex, currElevation);
             default:
                 return false;
         }
     }
 
-    public boolean isLocationProhibitedWiGE(Coords c, int currElevation) {
-        Hex hex = game.getBoard().getHex(c);
+    /**
+     * Returns whether a hovercraft is barred from the given hex. A grounded WiGE uses these same restrictions (TW
+     * p.55), so this is kept apart from the movement mode switch for {@link #isLocationProhibitedWiGE(Hex, int)}.
+     *
+     * @param hex the hex to test
+     *
+     * @return {@code true} if a hovercraft may not enter the hex
+     */
+    private boolean isHoverTerrainProhibited(Hex hex) {
+        boolean hexHasRoad = hex.containsTerrain(Terrains.ROAD);
+        if (hasAbility(OptionsConstants.PILOT_CROSS_COUNTRY) && !isSuperHeavy()) {
+            return (hex.terrainLevel(Terrains.MAGMA) > 1);
+        }
+
+        if (!isSuperHeavy()) {
+            boolean scoutBikeIntoLightWoods = (hex.terrainLevel(Terrains.WOODS) == 1) &&
+                  hasQuirk(OptionsConstants.QUIRK_POS_SCOUT_BIKE);
+            return (hex.containsTerrain(Terrains.WOODS) && !hexHasRoad && !scoutBikeIntoLightWoods) ||
+                  (hex.containsTerrain(Terrains.JUNGLE) && !hexHasRoad) ||
+                  (hex.terrainLevel(Terrains.MAGMA) > 1) ||
+                  ((hex.terrainLevel(Terrains.ROUGH) > 1) && !hexHasRoad) ||
+                  ((hex.terrainLevel(Terrains.RUBBLE) > 5) && !hexHasRoad);
+        } else {
+            return (hex.containsTerrain(Terrains.WOODS) && !hexHasRoad) ||
+                  (hex.containsTerrain(Terrains.JUNGLE) && !hexHasRoad) ||
+                  (hex.terrainLevel(Terrains.MAGMA) > 1);
+        }
+    }
+
+    /**
+     * Returns whether a WiGE, combat or support vehicle, is barred from the given hex at the given elevation. Some
+     * terrain bars it whether airborne or grounded: a building hex at or below the roof (WiGEs cannot enter a
+     * building, TW errata p.168), industrial terrain, and woods or jungle below the canopy unless it follows a road
+     * (TW p.55). A grounded WiGE (elevation 0) is also a hover vehicle for terrain restrictions (TW p.55), so it is
+     * kept out of liquid magma, ultra-rough and ultra-rubble just as a hovercraft is.
+     *
+     * @param hex           the hex to test, taken from the board being tested
+     * @param currElevation the WiGE's elevation in that hex
+     *
+     * @return {@code true} if the WiGE may not be in the hex at that elevation
+     */
+    protected boolean isLocationProhibitedWiGE(Hex hex, int currElevation) {
         if (hex.containsAnyTerrainOf(Terrains.IMPASSABLE, Terrains.SPACE, Terrains.SKY)) {
             return true;
         }
@@ -927,7 +958,7 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
             return true;
         }
 
-        if (hex.containsTerrain(Terrains.BUILDING) && (currElevation < hex.terrainLevel(Terrains.BLDG_ELEV))) {
+        if (hex.containsTerrain(Terrains.BUILDING) && (currElevation <= hex.terrainLevel(Terrains.BLDG_ELEV))) {
             return true;
         }
 
@@ -935,7 +966,11 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
             return true;
         }
 
-        return hex.hasVegetation() && !hex.containsTerrain(Terrains.ROAD) && (currElevation <= hex.vegetationCeiling());
+        if (hex.hasVegetation() && !hex.containsTerrain(Terrains.ROAD) && (currElevation <= hex.vegetationCeiling())) {
+            return true;
+        }
+
+        return (currElevation == 0) && isHoverTerrainProhibited(hex);
     }
 
     public void lockTurret(int turret) {
@@ -977,6 +1012,50 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
 
     public int getStunnedTurns() {
         return m_nStunnedTurns;
+    }
+
+    /**
+     * @return {@code true} if this VTOL or WiGE crashed this turn, after a sideslip or a landing, and so may not
+     *       attack (TW p.68)
+     */
+    public boolean hasCrashedThisTurn() {
+        return crashedThisTurn;
+    }
+
+    /**
+     * @param crashedThisTurn {@code true} when this VTOL or WiGE crashes after a sideslip or a landing (TW p.68)
+     */
+    public void setCrashedThisTurn(boolean crashedThisTurn) {
+        this.crashedThisTurn = crashedThisTurn;
+    }
+
+    /**
+     * Returns whether this VTOL or WiGE can land in the given hex. A WiGE may only land in clear or paved hexes, and
+     * treats water as clear (TW p.55, errata v12.0); a VTOL may land in clear or paved hexes, or on a building roof
+     * (TW p.54). A road or bridge counts as paved. Landing anywhere else is a crash (TW p.68).
+     *
+     * @param hex the hex to land in
+     *
+     * @return {@code true} if the vehicle can land in the hex
+     */
+    public boolean canLandIn(Hex hex) {
+        if (hex.isClearForTakeoff()) {
+            return true;
+        }
+        if (getMovementMode() == EntityMovementMode.WIGE) {
+            return hex.containsTerrain(Terrains.WATER);
+        }
+        return hex.containsTerrain(Terrains.BLDG_ELEV);
+    }
+
+    @Override
+    public boolean isEligibleForFiring() {
+        return !crashedThisTurn && super.isEligibleForFiring();
+    }
+
+    @Override
+    public boolean isEligibleForPhysical() {
+        return !crashedThisTurn && super.isEligibleForPhysical();
     }
 
     public void setStunnedTurns(int turns) {
@@ -1032,6 +1111,8 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
     @Override
     public void newRound(int roundNumber) {
         super.newRound(roundNumber);
+
+        crashedThisTurn = false;
 
         incrementMASCAndSuperchargerLevels();
 
@@ -1284,9 +1365,7 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
         HitData rv = new HitData(nArmorLoc);
         boolean bHitAimed = false;
         if ((aimedLocation != LOC_NONE) && !aimingMode.isNone()) {
-            int roll = Compute.d6(2);
-
-            if ((5 < roll) && (roll < 9)) {
+            if (Game.rulesManager.getRulesTarget().checkAimedLocation()) {
                 rv = new HitData(aimedLocation, side == ToHitData.SIDE_REAR, true);
                 bHitAimed = true;
             }
@@ -1306,7 +1385,7 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
                     } else if (bRear) {
                         rv = new HitData(LOC_LEFT, false, HitData.EFFECT_VEHICLE_MOVE_DAMAGED);
                     } else {
-                        rv = new HitData(LOC_LEFT, false, HitData.EFFECT_VEHICLE_MOVE_DAMAGED);
+                        rv = new HitData(LOC_RIGHT, false, HitData.EFFECT_VEHICLE_MOVE_DAMAGED);
                     }
                     rv.setMotiveMod(motiveMod);
                     break;
@@ -1415,7 +1494,7 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
 
         // are we wheeled and in light snow?
         Hex hex = game.getHex(getPosition(), getBoardId());
-        if ((null != hex) &&
+        if ((hex != null) &&
               (getMovementMode() == EntityMovementMode.WHEELED) &&
               (hex.terrainLevel(Terrains.SNOW) == 1)) {
             prd.addModifier(1, "thin snow");
@@ -1775,15 +1854,24 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
         return Math.max(0, caseLocations.size() - explicit);
     }
 
+    /**
+     * A vehicle survives vacuum only if it can hold itself up without air to push against, and is sealed, and its
+     * engine runs with no outside air to breathe. The rules name fission, fusion and fuel cell engines for Combat
+     * Vehicles (TO:AUE p.115) and fission, fusion and electric engines for Support Vehicles (TM p.122); MegaMek's
+     * Support Vehicle "Electric" engine is the battery.
+     *
+     * @return {@code true} when this vehicle will not survive vacuum conditions
+     */
     @Override
     public boolean doomedInVacuum() {
-        if (hasEngine() &&
-              (getEngine().isFusion() ||
-                    getEngine().getEngineType() == Engine.FISSION ||
-                    getEngine().getEngineType() == Engine.FUEL_CELL)) {
-            return !hasEnvironmentalSealing();
+        // Hovercraft, WiGEs and VTOLs all fly by pushing against air, so there is nothing for them to work with in a
+        // vacuum or a trace atmosphere however well sealed they are (TO:AR p.35, Expanded Movement Costs and
+        // Planetary Conditions Table, footnote 31; the ruling that hovercraft belong in that footnote alongside WiGEs
+        // and VTOLs is at battletech.com/forums topic 55634).
+        if (getMovementMode().isHoverVTOLOrWiGE()) {
+            return true;
         }
-        return true;
+        return !EnvironmentalSealingRules.canOperateInVacuum(this);
     }
 
     @Override
@@ -1802,9 +1890,9 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
     }
 
     /**
-     * Whether this vehicle type can use hull-down at all, independent of its current hex. Large Vehicles cannot use
-     * the cover, and naval, hydrofoil, and submarine (water-based) vehicles cannot dig in / hull down since
-     * hull-down requires a fortified land hex (TO:AR p.19).
+     * Whether this vehicle type can use hull-down at all, independent of its current hex. Large Vehicles cannot use the
+     * cover, and naval, hydrofoil, and submarine (water-based) vehicles cannot dig in / hull down since hull-down
+     * requires a fortified land hex (TO:AR p.19).
      *
      * @return true if this vehicle may ever go hull-down
      */
@@ -1878,6 +1966,19 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
         burningLocations = 0;
         infernoFire = false;
         infernos.clear();
+    }
+
+    @Override
+    public void clearGameState() {
+        super.clearGameState();
+        unjamTurret(getLocTurret());
+        unjamTurret(getLocTurret2());
+        resetJammedWeapons();
+        extinguishAll();
+        m_nStunnedTurns = 0;
+        // Fortifying and rubble clearing in progress refer to hexes of the last game's map
+        cancelFortify();
+        cancelClearingRubble();
     }
 
     /**
@@ -2635,7 +2736,7 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
         if ((armType == EquipmentType.T_ARMOR_STEALTH_VEHICLE) && addMount) {
             try {
                 this.addEquipment(EquipmentType.getArmorFromName(EquipmentType.getArmorTypeName(
-                    EquipmentType.T_ARMOR_STEALTH_VEHICLE, false)), LOC_BODY);
+                      EquipmentType.T_ARMOR_STEALTH_VEHICLE, false)), LOC_BODY);
             } catch (LocationFullException e) {
                 // this should never happen
             }
@@ -2676,7 +2777,7 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
                       (mpBoosters.hasSupercharger() ?
                             " Supercharger:" +
                                   getSuperchargerTurns() +
-                            (armed.hasSupercharger() ? "(" + getSuperchargerTarget() + "+)" : "(NA)") :
+                                  (armed.hasSupercharger() ? "(" + getSuperchargerTarget() + "+)" : "(NA)") :
                             "");
             }
             return str;
@@ -3295,5 +3396,10 @@ public class Tank extends Entity implements Fortifiable, RubbleClearer {
 
         // Vehicle must not already be destroyed
         return !isDestroyed() && !isDoomed();
+    }
+
+    @Override
+    public boolean isChassisFamiliarityEligible() {
+        return true;
     }
 }

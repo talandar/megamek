@@ -35,6 +35,8 @@
 
 package megamek.common.loaders;
 
+import static megamek.common.equipment.WeaponType.F_PPC_CAPACITOR_COMPATIBLE;
+
 import java.io.*;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -53,6 +55,8 @@ import megamek.common.equipment.EquipmentTypeLookup;
 import megamek.common.equipment.MiscType;
 import megamek.common.equipment.Mounted;
 import megamek.common.equipment.Sensor;
+import megamek.common.equipment.SensorChoiceHandler;
+import megamek.common.equipment.SensorFamily;
 import megamek.common.equipment.WeaponMounted;
 import megamek.common.equipment.WeaponType;
 import megamek.common.equipment.enums.MiscTypeFlag;
@@ -72,7 +76,6 @@ import megamek.common.verifier.TestInfantry;
 import megamek.common.weapons.lasers.clan.CLChemicalLaserWeapon;
 import megamek.common.weapons.ppc.clan.CLERPPC;
 import megamek.logging.MMLogger;
-import static megamek.common.equipment.WeaponType.F_PPC_CAPACITOR_COMPATIBLE;
 
 /**
  * Switches between the various type-specific parsers depending on suffix
@@ -257,6 +260,8 @@ public class MekFileParser {
             } else {
                 loader = new BLKMekFile(bb);
             }
+        } else if (lowerName.endsWith(".bfs")) {
+            loader = new BFSFile(is);
         } else {
             throw new EntityLoadingException("Unsupported file suffix");
         }
@@ -272,8 +277,15 @@ public class MekFileParser {
      * @param content String containing the unit representation
      */
     public void parse(String content) throws Exception {
-        final boolean isBlk = content.contains("<BlockVersion>") || content.contains("<UnitType>");
-        parse(new ByteArrayInputStream(content.getBytes()), isBlk ? ".blk" : ".mtf");
+        final String suffix;
+        if (content.contains("<BlockVersion>") || content.contains("<UnitType>")) {
+            suffix = ".blk";
+        } else if (BFSFile.isBfsContent(content)) {
+            suffix = ".bfs";
+        } else {
+            suffix = ".mtf";
+        }
+        parse(new ByteArrayInputStream(content.getBytes()), suffix);
     }
 
     /**
@@ -805,6 +817,38 @@ public class MekFileParser {
         ent.setCanon(isCanonUnitName(ent.getShortNameRaw()));
         ent.initMilitary();
         linkDumpers(ent);
+
+        // Last, because it overrides the sensor chosen above and needs the probe already in the sensor list
+        applySavedSensorChoice(ent);
+    }
+
+    /**
+     * Applies the sensor the player saved for this chassis and model, if they saved one.
+     *
+     * <p>Without this a unit always starts on the sensor the block above picked for it: the active probe if one is
+     * fitted, otherwise radar. Radar is usually the weakest sensor a military unit carries, which is the complaint
+     * behind RFE #5868.</p>
+     *
+     * <p>Example: a player saves Infrared for the Marauder MAD-3R. Every MAD-3R then starts on Mek IR rather than
+     * Mek Radar, in a MegaMek game and in a MekHQ campaign alike, because both load units through this method.</p>
+     *
+     * <p>A design that carries nothing from the saved family keeps its normal default.</p>
+     */
+    private static void applySavedSensorChoice(Entity entity) {
+        if (entity.getSensors().size() < 2) {
+            return;
+        }
+        SensorFamily savedFamily = SensorChoiceHandler.getSensorChoice(entity.getChassis(), entity.getModel());
+        if (savedFamily == null) {
+            return;
+        }
+        for (Sensor sensor : entity.getSensors()) {
+            if (savedFamily.covers(sensor.type())) {
+                entity.setNextSensor(sensor);
+                entity.setCustomSensorChoice(true);
+                return;
+            }
+        }
     }
 
     /**

@@ -43,12 +43,13 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
+import jakarta.annotation.Nullable;
 import megamek.MMConstants;
 import megamek.client.ratgenerator.FactionRecord;
-import megamek.common.annotations.Nullable;
 
 /**
  * This is a Faction class that unifies MHQ's Faction and the RATGenerator's FactionRecord and makes it available to all
@@ -71,10 +72,10 @@ import megamek.common.annotations.Nullable;
  */
 @SuppressWarnings("unused") // Class fields are assigned when factions are loaded from YAML files
 @JsonPropertyOrder({ "key", "name", "sucsCodes", "nameChanges", "aliases", "capital", "capitalChanges", "yearsActive", "successor",
-                     "tags", "color", "logo", "logoChanges", "background", "backgroundChanges", "camos", "camosChanges", "nameGenerator", "eraMods",
+                     "tags", "color", "icon", "iconChanges", "logo", "logoChanges", "background", "backgroundChanges", "camos", "camosChanges", "nameGenerator", "eraMods",
                      "ratingLevels", "fallBackFactions", "preInvasionHonorRating", "postInvasionHonorRating",
                      "formationBaseSize", "formationGrouping", "rankSystem", "factionLeaders", "usesMercenaries",
-                     "aresConventionsSignatory" })
+                     "aresConventionsSignatory", "subunits" })
 public class Faction2 {
     private static final int UNKNOWN = -1;
     private static final String DEFAULT_RANK_SYSTEM_INNER_SPHERE = "SLDF";
@@ -91,8 +92,16 @@ public class Faction2 {
     private String successor;
     private final Set<FactionTag> tags = new HashSet<>();
     private final Color color = Color.LIGHT_GRAY;
-    private String logo;
-    private final NavigableMap<Integer, String> logoChanges = new TreeMap<>();
+    private String icon;
+    private final NavigableMap<Integer, String> iconChanges = new TreeMap<>();
+
+    // Faction logos were replaced by icons; older faction files (e.g. in a user dir) may still contain them
+    @JsonProperty("logo")
+    private String legacyLogo;
+
+    @JsonProperty("logoChanges")
+    private final NavigableMap<Integer, String> legacyLogoChanges = new TreeMap<>();
+
     private String background;
     private final NavigableMap<Integer, String> backgroundChanges = new TreeMap<>();
 
@@ -103,6 +112,9 @@ public class Faction2 {
     private String nameGenerator;
     private int[] eraMods;
     private final List<String> ratingLevels = new ArrayList<>();
+    // The order is the lookup order, so Jackson must not replace this with its default HashSet. It did, and the Raven
+    // Alliance (CSR, OA, CLAN.IS) resolved to the Outworlds Alliance's rules ahead of Clan Snow Raven's.
+    @JsonDeserialize(as = LinkedHashSet.class)
     private final Set<String> fallBackFactions = new LinkedHashSet<>();
     private final HonorRating preInvasionHonorRating = HonorRating.NONE;
     private final HonorRating postInvasionHonorRating = HonorRating.NONE;
@@ -113,9 +125,98 @@ public class Faction2 {
     private List<FactionLeaderData> factionLeaders = new ArrayList<>();
     private final NavigableMap<Integer, Boolean> usesMercenaries = new TreeMap<>();
     private final NavigableMap<Integer, Boolean> aresConventionsSignatory = new TreeMap<>();
+    private final Map<String, Faction2> subunits = new LinkedHashMap<>();
+
+    /**
+     * The key of the faction that declared this one as a subunit, or {@code null} when this faction has a file of its
+     * own. Derived at load time from the file structure rather than read from YAML, so it is never written back out.
+     */
+    @JsonIgnore
+    private String parentCommand;
 
     public List<String> getRatingLevels() {
         return ratingLevels;
+    }
+
+    /**
+     * Returns the subordinate formations declared inside this faction's own file, keyed by the short identifier used
+     * in the YAML file rather than by their full key. A command such as the St. Ives Lancers declares its regiments
+     * here instead of each regiment needing a separate file:
+     *
+     * <pre>
+     * key: CC.SIL
+     * name: St. Ives Lancers
+     * subunits:
+     *   1st:
+     *     name: 1st St. Ives Lancers
+     * </pre>
+     *
+     * <p>Subunits are a file-organisation convenience only. At load time {@link SubunitRegistrar} registers each one
+     * as a full faction in its own right under the composed key {@code CC.SIL.1st}, so everything that consumes
+     * factions - the lobby, RAT generation, MekHQ - sees a flat list and needs no knowledge of the nesting.</p>
+     *
+     * @return The subunits declared in this faction's file, in declaration order. Never {@code null}.
+     */
+    public Map<String, Faction2> getSubunits() {
+        return subunits;
+    }
+
+    /**
+     * Returns the key of the command that declared this faction as one of its {@link #getSubunits() subunits}, if any.
+     *
+     * <p>This is set only for factions that came from inside another faction's file, such as the 1st St. Ives Lancers
+     * declared inside {@code CC.SIL}. A command written in its own file returns {@code null} even when it falls back
+     * to another command, because falling back is not the same as being declared inside it.</p>
+     *
+     * @return The declaring command's key, or {@code null} when this faction has its own file
+     */
+    @JsonIgnore
+    public @Nullable String getParentCommand() {
+        return parentCommand;
+    }
+
+    /**
+     * Returns whether this faction was declared inside another faction's file rather than having a file of its own.
+     *
+     * <p>Useful where only whole commands should be offered rather than their individual regiments - the Force
+     * Generator's sub-faction list, for example, shows the St. Ives Lancers but not their seven regiments.</p>
+     *
+     * @return {@code true} if this faction is a subunit of another
+     */
+    @JsonIgnore
+    public boolean isSubunit() {
+        return parentCommand != null;
+    }
+
+    /**
+     * Records the command that declared this faction as a subunit. Package-private because it is derived from the
+     * file structure at load time by {@link SubunitRegistrar}, never read from YAML.
+     *
+     * @param parentCommand The declaring command's key
+     */
+    void setParentCommand(String parentCommand) {
+        this.parentCommand = parentCommand;
+    }
+
+    /**
+     * Sets this faction's key. Package-private because a key normally comes from the YAML file; it is assigned after
+     * loading only for {@link #getSubunits() subunits}, whose key is composed from their parent's key and their
+     * identifier within it.
+     *
+     * @param key The full faction key, such as {@code CC.SIL.1st}
+     */
+    void setKey(String key) {
+        this.key = key;
+    }
+
+    /**
+     * Sets the personnel name generator. Package-private because it is normally read from the YAML file; it is
+     * assigned after loading only when a subunit inherits its parent's generator.
+     *
+     * @param nameGenerator The name generator to use, such as {@code Clan}
+     */
+    void setNameGenerator(@Nullable String nameGenerator) {
+        this.nameGenerator = nameGenerator;
     }
 
     public String getKey() {
@@ -176,27 +277,54 @@ public class Faction2 {
         return backgroundChanges;
     }
 
-    public String getLogo() {
-        return logo;
+    public String getIcon() {
+        return icon;
     }
 
     /**
-     * Returns the faction's logo image path for the given year, honoring any era-based
-     * {@link #getLogoChanges() logo changes}. Falls back to the base {@link #getLogo() logo} when no change applies
-     * for the year. Used to keep a consolidated rename lineage (for example Clan Goliath Scorpion becoming the
-     * Escorpion Imperio in 3080) visually era-correct after its faction files are merged into one.
+     * Returns the file name of the faction's icon for the given year, honoring any era-based
+     * {@link #getIconChanges() icon changes}. Falls back to the base {@link #getIcon() icon} when no change applies
+     * for the year. Icon files are found in {@code data/images/universe/factions/}.
+     *
+     * @param year the game year to resolve the icon for
+     *
+     * @return the era-appropriate icon file name, or the base icon when none applies
+     */
+    public String getIcon(int year) {
+        final Map.Entry<Integer, String> iconByYear = iconChanges.floorEntry(year);
+        return (iconByYear == null) ? icon : iconByYear.getValue();
+    }
+
+    public NavigableMap<Integer, String> getIconChanges() {
+        return iconChanges;
+    }
+
+    /**
+     * Returns the faction's legacy logo for the given year, honoring any era-based logo changes. Legacy logos predate
+     * {@link #getIcon(int) icons} and are only read so that older faction files (e.g. custom factions in a user dir)
+     * keep working. Unlike icons, they are paths relative to MekHQ's formation icon logo directory
+     * ({@code data/images/force/Pieces/Logos/}).
      *
      * @param year the game year to resolve the logo for
      *
-     * @return the era-appropriate logo image path, or the base logo when none applies
+     * @return the era-appropriate legacy logo path, or {@code null} if the faction has none
      */
-    public String getLogo(int year) {
-        final Map.Entry<Integer, String> logoByYear = logoChanges.floorEntry(year);
-        return (logoByYear == null) ? logo : logoByYear.getValue();
+    public @Nullable String getLegacyLogo(int year) {
+        final Map.Entry<Integer, String> logoByYear = legacyLogoChanges.floorEntry(year);
+        return (logoByYear == null) ? legacyLogo : logoByYear.getValue();
     }
 
-    public NavigableMap<Integer, String> getLogoChanges() {
-        return logoChanges;
+    /**
+     * Returns {@code true} when the faction names a {@link #getLegacyLogo(int) legacy logo} but no
+     * {@link #getIcon(int) icon}. MegaMek only shows icons, so such a faction, typically a custom one written for
+     * MekHQ, gets the generic logo instead of its own.
+     *
+     * @return {@code true} if the faction has a legacy logo and no icon
+     */
+    public boolean hasLegacyLogoWithoutIcon() {
+        boolean hasIcon = ((icon != null) && !icon.isBlank()) || !iconChanges.isEmpty();
+        boolean hasLegacyLogo = ((legacyLogo != null) && !legacyLogo.isBlank()) || !legacyLogoChanges.isEmpty();
+        return hasLegacyLogo && !hasIcon;
     }
 
     public int[] getEraMods() {
@@ -477,6 +605,11 @@ public class Faction2 {
     @JsonIgnore
     public boolean isMinorPower() {
         return is(FactionTag.MINOR);
+    }
+
+    @JsonIgnore
+    public boolean isMilitia() {
+        return is(FactionTag.MILITIA);
     }
 
     public boolean is(FactionTag tag) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2022-2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -56,6 +56,13 @@ public enum PacketCommand {
     /** A Server to Client packet instructing a Princess Client to replace its settings. */
     CHANGE_PRINCESS_SETTINGS,
 
+    /**
+     * A Princess Client reporting to the Server which players it currently considers dishonored (C -> S), or the Server
+     * relaying one bot's dishonored-players list to all Clients (S -> C). Lets Clients warn a human before an action
+     * that would newly dishonor them, without guessing at a remote bot's honor state.
+     */
+    PRINCESS_DISHONORED,
+
     /** A packet setting a Client's ready status (S -> C) or updating the Server on the Client's status (C -> S). */
     PLAYER_READY,
 
@@ -96,6 +103,7 @@ public enum PacketCommand {
     ENTITY_WORDER_UPDATE,
     ENTITY_ASSIGN,
     ENTITY_MODE_CHANGE,
+    ENTITY_CHARGE_CHANGE,
     ENTITY_AMMO_CHANGE,
     ENTITY_SENSOR_CHANGE,
     ENTITY_SINKS_CHANGE,
@@ -255,7 +263,72 @@ public enum PacketCommand {
      * during the lobby and broadcast it to all clients, so that everyone sees the battlefield that will actually
      * be played before the game starts.
      */
-    LOBBY_GENERATE_BOARD;
+    LOBBY_GENERATE_BOARD,
+
+    /**
+     * A Client to Server packet connecting a tractor and an ordered list of trailers into a train in one operation.
+     * Carries the tractor id and the trailer ids, ordered front to back. The server validates the whole chain and
+     * applies it in full or not at all, so a rejected request leaves every unit unattached.
+     */
+    ENTITY_BUILD_TRAIN,
+
+    /**
+     * A Client to Server packet carrying a Game Master's edit of one or more hexes: the hexes to change and the
+     * terrain they should end up holding. Sent instead of a chat command because an edit of a whole hex, across
+     * several hexes, is more than a command line can carry. The server accepts it only from a Game Master, and
+     * validates every hex before changing any of them.
+     */
+    HEX_EDIT,
+
+    /**
+     * A Client to Server packet carrying a Game Master's edit of the building in one hex: what should be standing
+     * there when the edit is done. The same packet puts a building where there was none, changes the one that is
+     * there and takes it away; the server works out which by looking at the hex. Accepted only from a Game Master.
+     */
+    BUILDING_EDIT,
+
+    /**
+     * A Client to Server packet turning one unit's automatic ejection on or off after the lobby has closed. Carries
+     * only that one setting, so the server's copy of the unit keeps every piece of state the sender does not own.
+     * Accepted only from the unit's owner.
+     */
+    ENTITY_EJECTION_SETTING_CHANGE,
+    /** A player's declaration for an infantry action in a building, in the Pre-End Declarations phase. */
+    INFANTRY_ACTION_DECLARATION,
+    /** A unit's order to scan a hex or unit in the End Phase (Objectives series); carries a {@code ScanAction}. */
+    ENTITY_SCAN_ORDER,
+    /**
+     * A game master's edit of the objective at a hex, at any time in the game: the hex and the marker to put there,
+     * or {@code null} to remove it (Objectives series).
+     */
+    OBJECTIVE_EDIT,
+    /**
+     * A game master's marking of an enemy unit as one the mission wants scanned, or the removal of that marking:
+     * the unit's id and whether it is wanted (Objectives series).
+     */
+    SCAN_DESIGNATION,
+    /** A unit's withdrawal of the scan it ordered this turn, before the End Phase resolves it; carries its id. */
+    ENTITY_SCAN_WITHDRAW,
+    /**
+     * A Server to Client packet carrying every team's initiative roll, as a map from player id to the roll of that
+     * player's team. Team rolls decide who wins initiative but are not part of a player update, so without this a
+     * client only knows each player's roll for ordering within their own team.
+     */
+    TEAM_INITIATIVE,
+    /**
+     * A Server to Client packet telling a player that someone pinged them: the sender's player id and whether the
+     * ping went to everyone. The client plays its ping sound and shows who pinged it.
+     */
+    PLAYER_PING,
+    /**
+     * A Server to Client packet telling every player already in the game that someone was refused for running a
+     * different version: the refused player's name (or {@code null} when their client is too old to send one), their
+     * version, and the server's version. Each human client shows a dialog.
+     *
+     * <p>Packet commands travel as their position in this list, so new commands must always be added at the end;
+     * inserting one earlier would shift the handshake commands and break the version check against older builds.</p>
+     */
+    PLAYER_REFUSED_DIFFERENT_VERSION;
     //endregion Enum Declarations
 
     //region Boolean Comparison Methods

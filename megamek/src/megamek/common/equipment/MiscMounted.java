@@ -33,9 +33,9 @@
 
 package megamek.common.equipment;
 
+import jakarta.annotation.Nullable;
 import megamek.common.CriticalSlot;
 import megamek.common.Messages;
-import megamek.common.annotations.Nullable;
 import megamek.common.equipment.enums.MiscTypeFlag;
 import megamek.common.units.Entity;
 import megamek.common.units.Mek;
@@ -76,7 +76,7 @@ public class MiscMounted extends Mounted<MiscType> {
         if (type.hasFlag(MiscType.F_SENSOR_DISPENSER)) {
             setShotsLeft(type.hasFlag(MiscType.F_BA_EQUIPMENT) ? 6 : 30);
         }
-        if (((type.isShield() || type.hasFlag(MiscType.F_MODULAR_ARMOR)))) {
+        if (((type.hasFlag(MiscType.F_SHIELD) || type.hasFlag(MiscType.F_MODULAR_ARMOR)))) {
             baseDamageAbsorptionRate = type.getBaseDamageAbsorptionRate();
             baseDamageCapacity = type.getBaseDamageCapacity();
         }
@@ -101,6 +101,17 @@ public class MiscMounted extends Mounted<MiscType> {
      */
     public boolean isBridgeLayer() {
         return bridgeLayerState != null;
+    }
+
+    @Override
+    public void clearGameState() {
+        super.clearGameState();
+        // Without this, a bridge laid or about to be laid in the last game still counts as placed, at a hex of that
+        // game's map. Damage to the bridge and its deploy mechanism is kept.
+        if (bridgeLayerState != null) {
+            bridgeLayerState.clearPendingDeploy();
+            bridgeLayerState.setDeployed(false);
+        }
     }
 
     public int getBaseDamageAbsorptionRate() {
@@ -145,7 +156,7 @@ public class MiscMounted extends Mounted<MiscType> {
 
             Mounted<?> m = cs.getMount();
             EquipmentType type = m.getType();
-            if ((type instanceof MiscType) && ((MiscType) type).isShield()) {
+            if (type.hasFlag(MiscType.F_SHIELD)) {
                 if (cs.isDamaged()) {
                     base--;
                 }
@@ -205,7 +216,7 @@ public class MiscMounted extends Mounted<MiscType> {
 
             Mounted<?> m = cs.getMount();
             EquipmentType type = m.getType();
-            if ((type instanceof MiscType) && ((MiscType) type).isShield()) {
+            if (type.hasFlag(MiscType.F_SHIELD)) {
                 if (cs.isDamaged()) {
                     base -= 5;
                 }

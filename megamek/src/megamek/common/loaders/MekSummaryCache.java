@@ -41,15 +41,16 @@ import java.util.*;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
+import jakarta.annotation.Nullable;
 import megamek.common.Configuration;
 import megamek.common.MPCalculationSetting;
 import megamek.common.TechConstants;
 import megamek.common.alphaStrike.ASUnitType;
 import megamek.common.alphaStrike.AlphaStrikeElement;
 import megamek.common.alphaStrike.conversion.ASConverter;
-import megamek.common.annotations.Nullable;
 import megamek.common.battleArmor.BattleArmor;
 import megamek.common.battleArmor.BattleArmorHandles;
+import megamek.common.battlefieldSupport.BattlefieldSupportAsset;
 import megamek.common.bays.*;
 import megamek.common.equipment.DockingCollar;
 import megamek.common.equipment.EquipmentType;
@@ -91,7 +92,7 @@ public class MekSummaryCache {
     public static final String FILENAME_LOOKUP = "name_changes.txt";
 
     private static final List<String> SUPPORTED_FILE_EXTENSIONS = List.of(".mtf", ".blk", ".mep", ".hmv", ".tdb",
-          ".hmp", ".zip");
+          ".hmp", ".bfs", ".zip");
 
     private static MekSummaryCache instance;
     private static volatile boolean disposeInstance = false;
@@ -102,6 +103,13 @@ public class MekSummaryCache {
     private MekSummary[] data;
     private final Map<String, MekSummary> nameMap;
     private final Map<String, MekSummary> fileNameMap;
+    // Battlefield Support Assets keyed by their name (chassis + model). Assets share a name with their base unit, so
+    // they are tracked separately here to keep both retrievable via name lookups (e.g. MUL loading).
+    private final Map<String, MekSummary> assetNameMap;
+    /** All units keyed by their unit-file UUID (the identity used for asset&lt;-&gt;base-unit linking). */
+    private final Map<String, MekSummary> uuidMap;
+    /** Battlefield Support Assets keyed by the UUID of the base unit they link to. */
+    private final Map<String, MekSummary> assetByLinkedUnitId;
     private Map<String, String> failedFiles;
     private int cacheCount;
     private int fileCount;
@@ -110,6 +118,7 @@ public class MekSummaryCache {
     private final List<Listener> listeners = new ArrayList<>();
 
     private StringBuffer loadReport = new StringBuffer();
+    private StringBuffer cacheCollisionReport = new StringBuffer();
     private volatile Thread loader;
 
     private LoadOperation queuedLoadOperation;
@@ -267,6 +276,9 @@ public class MekSummaryCache {
     private MekSummaryCache() {
         nameMap = new HashMap<>();
         fileNameMap = new HashMap<>();
+        assetNameMap = new HashMap<>();
+        uuidMap = new HashMap<>();
+        assetByLinkedUnitId = new HashMap<>();
     }
 
     public MekSummary[] getAllMeks() {
@@ -297,7 +309,79 @@ public class MekSummaryCache {
             return nameMap.get(sRef);
         }
 
+        if (assetNameMap.containsKey(sRef)) {
+            return assetNameMap.get(sRef);
+        }
+
         return fileNameMap.get(sRef);
+    }
+
+    /**
+     * @param name the unit name (chassis + model)
+     *
+     * @return the Battlefield Support Asset summary with the given name, or {@code null} if none exists. Unlike
+     *       {@link #getMek(String)}, this returns the Asset form even when a base unit shares the same name.
+     */
+    @Nullable
+    public MekSummary getAsset(String name) {
+        block();
+        return assetNameMap.get(name);
+    }
+
+    /**
+     * @param unitFileUUID a unit-file UUID
+     *
+     * @return the unit summary with the given unit-file UUID, or {@code null} if none exists
+     */
+    @Nullable
+    public MekSummary getByUnitFileUUID(@Nullable String unitFileUUID) {
+        if ((unitFileUUID == null) || unitFileUUID.isBlank()) {
+            return null;
+        }
+        block();
+        return uuidMap.get(unitFileUUID);
+    }
+
+    /**
+     * @param baseUnit a non-asset unit summary
+     *
+     * @return the Battlefield Support Asset linked to the given base unit (whose {@code linkedUnitId} is the base
+     *       unit's UUID), or {@code null} if the base unit has no linked asset (or is itself an asset)
+     */
+    @Nullable
+    public MekSummary getLinkedAsset(@Nullable MekSummary baseUnit) {
+        if ((baseUnit == null) || baseUnit.isBattlefieldSupportAsset()) {
+            return null;
+        }
+        return getLinkedAssetForUnitFileUUID(baseUnit.getUnitFileUUID());
+    }
+
+    /**
+     * @param baseUnitFileUUID the base unit's unit-file UUID
+     *
+     * @return the Battlefield Support Asset linked to the base unit with that UUID, or {@code null} if there is none
+     */
+    @Nullable
+    public MekSummary getLinkedAssetForUnitFileUUID(@Nullable String baseUnitFileUUID) {
+        if ((baseUnitFileUUID == null) || baseUnitFileUUID.isBlank()) {
+            return null;
+        }
+        block();
+        return assetByLinkedUnitId.get(baseUnitFileUUID);
+    }
+
+    /**
+     * @param asset a Battlefield Support Asset summary
+     *
+     * @return the base unit linked to the given asset (the unit whose UUID equals the asset's {@code linkedUnitId}), or
+     *       {@code null} if the asset is standalone (or is not an asset)
+     */
+    @Nullable
+    public MekSummary getLinkedBaseUnit(@Nullable MekSummary asset) {
+        if ((asset == null) || !asset.isBattlefieldSupportAsset()) {
+            return null;
+        }
+        return getByUnitFileUUID(asset.getLinkedUnitId());
     }
 
     public Map<String, String> getFailedFiles() {
@@ -343,7 +427,7 @@ public class MekSummaryCache {
                         File fSource = ms.getSourceFile();
                         if (fSource.exists()) {
                             vMeks.addElement(ms);
-                            if (null == ms.getEntryName()) {
+                            if (ms.getEntryName() == null) {
                                 sKnownFiles.add(fSource.toString());
                             } else {
                                 sKnownFiles.add(ms.getEntryName());
@@ -355,6 +439,12 @@ public class MekSummaryCache {
                     inputStream.close();
                 }
             } catch (Exception ex) {
+                // A cache-format change can fail after some entries were read. Rescan every unit instead of retaining
+                // partial data or treating the old cache timestamp as authoritative.
+                vMeks.clear();
+                sKnownFiles.clear();
+                lLastCheck = 0;
+                cacheCount = 0;
                 loadReport.append("  Unable to load unit cache: ").append(ex.getMessage()).append("\n");
                 logger.error(loadReport.toString(), ex);
             }
@@ -439,13 +529,32 @@ public class MekSummaryCache {
         vMeks.copyInto(updatedData);
         Map<String, MekSummary> updatedNameMap = new HashMap<>();
         Map<String, MekSummary> updatedFileNameMap = new HashMap<>();
-
+        Map<String, MekSummary> updatedAssetNameMap = new HashMap<>();
+        Map<String, MekSummary> updatedUuidMap = new HashMap<>();
+        Map<String, MekSummary> updatedAssetByLinkedUnitId = new HashMap<>();
         // store map references
         for (MekSummary element : updatedData) {
             if (shouldStopLoading()) {
                 return false;
             }
-            updatedNameMap.put(element.getName(), element);
+            if (element.isBattlefieldSupportAsset()) {
+                // Assets share a name with their base unit; keep them in a dedicated map so both remain retrievable
+                // and the plain-name lookup keeps returning the base unit (what MUL/other name lookups expect).
+                putFirst(updatedAssetNameMap, element.getName(), element,
+                      "Battlefield Support Asset name", cacheCollisionReport);
+                String linkedUnitId = element.getLinkedUnitId();
+                if ((linkedUnitId != null) && !linkedUnitId.isBlank()) {
+                    putFirst(updatedAssetByLinkedUnitId, linkedUnitId, element,
+                          "Battlefield Support Asset linked-unit UUID", cacheCollisionReport);
+                }
+            } else {
+                updatedNameMap.put(element.getName(), element);
+            }
+            String unitFileUUID = element.getUnitFileUUID();
+            if ((unitFileUUID != null) && !unitFileUUID.isBlank()) {
+                putFirst(updatedUuidMap, unitFileUUID, element, "unit-file UUID",
+                      cacheCollisionReport);
+            }
             String entryName = element.getEntryName();
             if (entryName == null) {
                 updatedFileNameMap.put(element.getSourceFile().getName(), element);
@@ -469,7 +578,33 @@ public class MekSummaryCache {
         nameMap.putAll(updatedNameMap);
         fileNameMap.clear();
         fileNameMap.putAll(updatedFileNameMap);
+        assetNameMap.clear();
+        assetNameMap.putAll(updatedAssetNameMap);
+        uuidMap.clear();
+        uuidMap.putAll(updatedUuidMap);
+        assetByLinkedUnitId.clear();
+        assetByLinkedUnitId.putAll(updatedAssetByLinkedUnitId);
         return true;
+    }
+
+    /**
+     * Adds a cache lookup entry unless its key is already assigned. Duplicate keys retain the first loaded summary so
+     * name-only legacy callers continue to receive a deterministic result; the conflicting source is reported.
+     */
+    static void putFirst(Map<String, MekSummary> index, String key, MekSummary summary, String keyType,
+          StringBuffer report) {
+        MekSummary previous = index.putIfAbsent(key, summary);
+        if (previous != null) {
+            report.append("  Ambiguous ").append(keyType).append(" '").append(key).append("' for ")
+                  .append(summarySource(previous)).append(" and ").append(summarySource(summary)).append("; ")
+                  .append("retaining the first-loaded lookup result.\n");
+        }
+    }
+
+    private static String summarySource(MekSummary summary) {
+        String entryName = summary.getEntryName();
+        return (entryName == null) ? summary.getSourceFile().toString()
+              : summary.getSourceFile() + "!" + entryName;
     }
 
     private void logReport() {
@@ -480,11 +615,16 @@ public class MekSummaryCache {
                   .append(" units failed to load...\n");
         }
 
+        if (!cacheCollisionReport.isEmpty()) {
+            loadReport.append(cacheCollisionReport);
+            logger.warn("Unit cache lookup collisions; first-loaded results are retained:\n{}", cacheCollisionReport);
+        }
         logger.debug(loadReport.toString());
     }
 
     private void resetLoadStats() {
         loadReport = new StringBuffer();
+        cacheCollisionReport = new StringBuffer();
         failedFiles = new HashMap<>();
         cacheCount = 0;
         fileCount = 0;
@@ -574,7 +714,7 @@ public class MekSummaryCache {
             File source = mekSummary.getSourceFile();
             if (source.exists()) {
                 units.add(mekSummary);
-                if (null == mekSummary.getEntryName()) {
+                if (mekSummary.getEntryName() == null) {
                     knownFiles.add(source.toString());
                 } else {
                     knownFiles.add(mekSummary.getEntryName());
@@ -638,8 +778,8 @@ public class MekSummaryCache {
     }
 
     /**
-     * Builds a fully populated {@link MekSummary} from a standalone unit file, without requiring the entire unit
-     * cache to be loaded. The unit does not need to be part of the official cache.
+     * Builds a fully populated {@link MekSummary} from a standalone unit file, without requiring the entire unit cache
+     * to be loaded. The unit does not need to be part of the official cache.
      *
      * <p>This is intended for tooling (such as the SVG mass printer) that needs to process arbitrary or custom
      * {@code .blk}/{@code .mtf} files.</p>
@@ -662,6 +802,10 @@ public class MekSummaryCache {
         ms.setChassis(e.getChassis());
         ms.setClanChassisName(e.getClanChassisName());
         ms.setModel(e.getModel());
+        ms.setUnitFileUUID(e.getUnitFileUUID());
+        if (e instanceof megamek.common.battlefieldSupport.BattlefieldSupportAsset asset) {
+            ms.setLinkedUnitId(asset.getLinkedUnitId());
+        }
         ms.setMulId(e.getMulId());
         ms.setUnitType(UnitType.getTypeName(e.getUnitType()));
         ms.setFullAccurateUnitType(Entity.getEntityTypeName(e.getEntityType()));
@@ -707,10 +851,38 @@ public class MekSummaryCache {
         }
 
         ms.setBV(e.calculateBattleValue(true, true));
+        if (e instanceof BattlefieldSupportAsset asset) {
+            Integer veteranBv = asset.getVeteranBv();
+            ms.setBfsVeteranBv((veteranBv != null) ? veteranBv : 0);
+            ms.setBfsAssetType(asset.getAssetType());
+            ms.setBfsCardTitle(asset.getEffectiveCardTitle());
+            ms.setBfsCardSubtitle(asset.getEffectiveCardSubtitle());
+            ms.setBfsMovementMode(asset.getMovementMode());
+            ms.setBfsMp(asset.getMp());
+            ms.setBfsTmm(asset.getTmm());
+            ms.setBfsRange(asset.getRange());
+            ms.setBfsRangeKeyword(asset.getRangeKeywordLabel());
+            ms.setBfsSkill(asset.getSkill());
+            ms.setBfsDamage(asset.getDamage());
+            ms.setBfsDestroyCheck(asset.getODestroyCheck());
+            ms.setBfsThreshold(asset.getThreshold());
+            ms.setBfsBsp(asset.getEffectiveBsp());
+            ms.setBfsSpecials(asset.getSpecials().stream()
+                  .map(special -> special.knownType().orElse(null))
+                  .filter(java.util.Objects::nonNull)
+                  .distinct()
+                  .collect(java.util.stream.Collectors.toList()));
+            ms.setBfsSpecialDetails(new java.util.ArrayList<>(asset.getSpecials()));
+        }
         ms.setGenericBattleValue(e.getGenericBattleValue());
         ms.setLevel(TechConstants.T_SIMPLE_LEVEL[e.getTechLevel()]);
         ms.setAdvancedYear(e.getProductionDate(e.isClan()));
         ms.setStandardYear(e.getCommonDate(e.isClan()));
+        ms.setPrototypeDate(e.getPrototypeDate());
+        ms.setProductionDate(e.getProductionDate());
+        ms.setCommonDate(e.getCommonDate());
+        ms.setExtinctionDate(e.getExtinctionDate());
+        ms.setReintroductionDate(e.getReintroductionDate());
         ms.setExtinctRange(e.getExtinctionRange());
         ms.setForceGeneratorAvailability(e.getForceGeneratorAvailability());
         ms.setMissionRoles(e.getMissionRoles());
@@ -723,6 +895,7 @@ public class MekSummaryCache {
         ms.setJumpMp(e.getAnyTypeMaxJumpMP());
         ms.setMoveMode(e.getMovementMode());
         ms.setClan(e.isClan());
+        ms.setMixedTech(e.isMixedTech());
         if (e.isSupportVehicle()) {
             ms.setSupport(true);
         }
@@ -740,11 +913,12 @@ public class MekSummaryCache {
         if (ms.isSupport()) {
             ms.setWeightClass(EntityWeightClass.getSupportWeightClass(ms.getTons(), ms.getUnitSubType()));
         } else {
-            double weightClassWeight = ms.isBattleArmor() ? ms.getSuitWeight() : ms.getTons();
+            double weightClassWeight = e.isBattleArmor() ? ms.getSuitWeight() : ms.getTons();
             ms.setWeightClass(EntityWeightClass.getWeightClass(weightClassWeight, ms.getUnitType()));
         }
 
         ms.setEquipment(e.getEquipment());
+        ms.setRulesRefs(e);
         ms.setQuirkNames(e.getQuirks());
         ms.setWeaponQuirkNames(e);
         ms.setTotalArmor(e.getTotalArmor());
@@ -788,6 +962,7 @@ public class MekSummaryCache {
 
         ms.setTechLevel(e.getStaticTechLevel().toString());
         ms.setTechLevelCode(e.getStaticTechLevel().ordinal());
+        ms.setTechRating(e.getTechRating());
         ms.setTechBase(e.getTechBaseDescription());
 
         ms.setFailedToLoadEquipment(e.getFailedEquipment().hasNext());
@@ -1112,6 +1287,7 @@ public class MekSummaryCache {
         }
         loadReport.append("  Looking in zip file ").append(fZipFile.getPath())
               .append("...\n");
+        List<MekSummary> reloadedSummaries = new ArrayList<>();
 
         for (Enumeration<?> i = zFile.entries(); i.hasMoreElements(); ) {
             if (shouldStopLoading()) {
@@ -1146,7 +1322,7 @@ public class MekSummaryCache {
                       zFile.getInputStream(zEntry), zEntry.getName());
                 Entity e = mfp.getEntity();
                 MekSummary ms = getSummary(e, fZipFile, zEntry.getName());
-                vMeks.addElement(ms);
+                reloadedSummaries.add(ms);
                 sKnownFiles.add(zEntry.getName());
                 bNeedsUpdate = true;
                 thisZipFileCount++;
@@ -1180,10 +1356,36 @@ public class MekSummaryCache {
             logger.error("", ex);
         }
 
+        // A reloaded entry replaces every cached summary of it. Adding beside them would keep the stale copies,
+        // so a cache refreshed after each upgrade would gain one more copy of every unit in the zip.
+        removeCachedZipSummaries(vMeks, fZipFile, reloadedSummaries);
+        vMeks.addAll(reloadedSummaries);
+
         loadReport.append("  ...loaded ").append(thisZipFileCount)
               .append(" files.\n");
 
         return bNeedsUpdate;
+    }
+
+    /**
+     * Removes the cached summaries of the zip entries that were just read again.
+     *
+     * @param summaries          the summaries to remove from
+     * @param zipFile            the zip file the entries belong to
+     * @param reloadedSummaries  the fresh summaries; any cached summary with the same zip entry is removed
+     */
+    private static void removeCachedZipSummaries(Vector<MekSummary> summaries, File zipFile,
+          List<MekSummary> reloadedSummaries) {
+        if (reloadedSummaries.isEmpty()) {
+            return;
+        }
+        Set<String> entryNames = new HashSet<>();
+        for (MekSummary reloadedSummary : reloadedSummaries) {
+            entryNames.add(reloadedSummary.getEntryName());
+        }
+        // removeIf compacts the vector in one pass; removing through an iterator would shift it once per removal
+        summaries.removeIf(summary -> zipFile.equals(summary.getSourceFile())
+              && entryNames.contains(summary.getEntryName()));
     }
 
     private void addLookupNames() {
@@ -1195,7 +1397,7 @@ public class MekSummaryCache {
                 String line;
                 String lookupName;
                 String entryName;
-                while (null != (line = br.readLine())) {
+                while ((line = br.readLine()) != null) {
                     if (line.startsWith("#")) {
                         continue;
                     }
@@ -1205,7 +1407,7 @@ public class MekSummaryCache {
                         entryName = line.substring(index + 1);
                         if (!nameMap.containsKey(lookupName)) {
                             MekSummary ms = nameMap.get(entryName);
-                            if (null != ms) {
+                            if (ms != null) {
                                 nameMap.put(lookupName, ms);
                             }
                         }

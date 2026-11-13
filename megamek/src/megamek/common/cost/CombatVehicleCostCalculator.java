@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2022-2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -302,8 +302,7 @@ public class CombatVehicleCostCalculator {
         left.add("Omni Multiplier");
         left.add("Tonnage Multiplier");
         if (!tank.isSupportVehicle()) {
-
-            left.add("Flotation Hull/Environmental Sealing multiplier");
+            left.add("Flotation Hull/Environmental Sealing Multiplier");
             left.add("Off-Road Multiplier");
         }
         return left;

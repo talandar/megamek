@@ -34,22 +34,43 @@ package megamek.client.ui.settings;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.Component;
 import java.awt.Container;
+import java.lang.reflect.InvocationTargetException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.ListResourceBundle;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JTree;
 import javax.swing.SwingUtilities;
 
+import megamek.client.ui.clientGUI.GUIPreferences;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class SettingsPaneTest {
+    private boolean originalExpansionPreference;
+
+    @BeforeEach
+    void setExpansionPreference() {
+        originalExpansionPreference = GUIPreferences.getInstance().getExpandOptionSections();
+        GUIPreferences.getInstance().setExpandOptionSections(true);
+    }
+
+    @AfterEach
+    void restoreExpansionPreference() {
+        GUIPreferences.getInstance().setExpandOptionSections(originalExpansionPreference);
+    }
+
     private static final SettingsNavigationText NAVIGATION_TEXT = new SettingsNavigationText(
           "Filter", "Filter settings", "No matches", "%d matches", "Expand", "Collapse");
     private static final SettingsTextProvider PAGE_TEXT = SettingsTextProvider.fromResourceBundle(
@@ -61,146 +82,388 @@ class SettingsPaneTest {
           });
 
     @Test
-    void pagesAreCreatedLazilyAndCached() {
-        SettingsRoute first = new SettingsRoute("first", List.of("First"));
-        SettingsRoute second = new SettingsRoute("second", List.of("Second"));
+    void pagesAreCreatedLazilyAndCached() throws Exception {
         AtomicInteger firstBuilds = new AtomicInteger();
         AtomicInteger secondBuilds = new AtomicInteger();
-        Map<String, Supplier<Component>> factories = new HashMap<>();
-        factories.put("first", () -> {
-            firstBuilds.incrementAndGet();
-            return page("First section", "first summary");
-        });
-        factories.put("second", () -> {
-            secondBuilds.incrementAndGet();
-            return page("Second section", "second summary");
-        });
-        SettingsPane pane = new SettingsPane(List.of(first, second), factories, NAVIGATION_TEXT, "Details");
+        runOnEdt(() -> {
+            SettingsRoute first = new SettingsRoute("first", List.of("First"));
+            SettingsRoute second = new SettingsRoute("second", List.of("Second"));
+            Map<String, Supplier<Component>> factories = new HashMap<>();
+            factories.put("first", () -> {
+                firstBuilds.incrementAndGet();
+                return page("First section", "first summary");
+            });
+            factories.put("second", () -> {
+                secondBuilds.incrementAndGet();
+                return page("Second section", "second summary");
+            });
+            SettingsPane pane = new SettingsPane(List.of(first, second), factories, NAVIGATION_TEXT);
 
-        pane.selectRoute(second);
-        pane.selectRoute(second);
+            pane.selectRoute(second);
+            pane.selectRoute(second);
 
-        assertEquals(1, firstBuilds.get());
-        assertEquals(1, secondBuilds.get());
+            assertEquals(1, firstBuilds.get());
+            assertEquals(1, secondBuilds.get());
+        });
     }
 
     @Test
-    void activeFilterExpandsOnlyMatchingSection() {
-        SettingsRoute route = new SettingsRoute("page", List.of("Page"));
-        SettingsPagePanel page = SettingsPagePanel.builder("Test", PAGE_TEXT, "header", null)
-              .sectionsExpandedByDefault(false)
-              .literalSection("Alpha", "alpha summary", new JLabel())
-              .literalSection("Beta", "beta summary", new JLabel())
-              .build();
-        SettingsPane pane = new SettingsPane(List.of(route), Map.of("page", () -> page),
-              NAVIGATION_TEXT, "Details");
+    void changedPreferenceRefreshesCachedPagesAndPreservesExceptions() throws Exception {
+        runOnEdt(() -> {
+            SettingsRoute normal = new SettingsRoute("normal", List.of("Normal"));
+            SettingsRoute forced = new SettingsRoute("forced", List.of("Forced"));
+            SettingsRoute single = new SettingsRoute("single", List.of("Single"));
+            SettingsPagePanel normalPage = SettingsPagePanel.builder("Normal", PAGE_TEXT, "header", null)
+                  .literalSection("Alpha", null, new JPanel())
+                  .literalSection("Beta", null, new JPanel())
+                  .build();
+            SettingsPagePanel forcedPage = SettingsPagePanel.builder("Forced", PAGE_TEXT, "header", null)
+                  .sectionsExpandedByDefault(true)
+                  .literalSection("Alpha", null, new JPanel())
+                  .literalSection("Beta", null, new JPanel())
+                  .build();
+            SettingsPagePanel singlePage = page("Single", null);
+            SettingsPane pane = new SettingsPane(List.of(normal, forced, single), Map.of(
+                  "normal", () -> normalPage, "forced", () -> forcedPage, "single", () -> singlePage),
+                  NAVIGATION_TEXT);
+            normalPage.collapseAllSections();
+            pane.refreshSectionExpansionDefaults();
+            assertEquals(List.of(false, false), normalPage.getSectionExpansionState());
 
-        pane.setFilterText("beta");
-        pane.selectRoute(route);
+            pane.selectRoute(forced);
+            pane.selectRoute(single);
+            GUIPreferences.getInstance().setExpandOptionSections(false);
+            pane.refreshSectionExpansionDefaults();
+            assertEquals(List.of(false, false), normalPage.getSectionExpansionState());
+            assertEquals(List.of(true, true), forcedPage.getSectionExpansionState());
+            assertEquals(List.of(true), singlePage.getSectionExpansionState());
 
-        List<CollapsibleSectionPanel> sections = findSections(page);
-        assertEquals(2, sections.size());
-        assertFalse(sections.get(0).isExpanded());
-        assertTrue(sections.get(1).isExpanded());
+            GUIPreferences.getInstance().setExpandOptionSections(true);
+            pane.selectRoute(normal);
+            assertEquals(List.of(true, true), normalPage.getSectionExpansionState());
+        });
     }
 
     @Test
-    void parentRouteFallsBackToFirstDescendantPage() {
-        SettingsRoute initial = new SettingsRoute("initial", List.of("Initial"));
-        SettingsRoute parent = new SettingsRoute("group", List.of("Group"));
-        SettingsRoute child = new SettingsRoute("child", List.of("Group", "Child"),
-              List.of("group", "group.child"), List.of(), true);
+    void changedPreferenceReplacesSearchSnapshotWithoutHidingMatches() throws Exception {
+        runOnEdt(() -> {
+            SettingsRoute route = new SettingsRoute("page", List.of("Page"));
+            SettingsPagePanel page = SettingsPagePanel.builder("Test", PAGE_TEXT, "header", null)
+                  .literalSection("Alpha", null, new JLabel("Alpha option"))
+                  .literalSection("Beta", null, new JLabel("Needle option"))
+                  .build();
+            SettingsPane pane = new SettingsPane(List.of(route), Map.of("page", () -> page), NAVIGATION_TEXT);
+            pane.setFilterText("needle");
+
+            GUIPreferences.getInstance().setExpandOptionSections(false);
+            pane.refreshSectionExpansionDefaults();
+            assertEquals(List.of(false, true), page.getSectionExpansionState());
+
+            pane.setFilterText("");
+            assertEquals(List.of(false, false), page.getSectionExpansionState());
+        });
+    }
+
+    @Test
+    void activeFilterExpandsOnlyMatchingSection() throws Exception {
+        runOnEdt(() -> {
+            SettingsRoute route = new SettingsRoute("page", List.of("Page"));
+            SettingsPagePanel page = SettingsPagePanel.builder("Test", PAGE_TEXT, "header", null)
+                .sectionsExpandedByDefault(false)
+                .literalSection("Alpha", "alpha summary", new JLabel())
+                .literalSection("Beta", "beta summary", new JLabel())
+                .build();
+            SettingsPane pane = new SettingsPane(List.of(route), Map.of("page", () -> page),
+                NAVIGATION_TEXT);
+
+            pane.setFilterText("beta");
+            pane.selectRoute(route);
+
+            List<CollapsibleSectionPanel> sections = findSections(page);
+            assertEquals(2, sections.size());
+            assertFalse(sections.get(0).isExpanded());
+            assertTrue(sections.get(1).isExpanded());
+        });
+        flushEventQueue();
+    }
+
+    @Test
+    void typingFilterExpandsMatchingSectionOnCurrentPage() throws Exception {
+        runOnEdt(() -> {
+            SettingsRoute route = new SettingsRoute("page", List.of("Page"));
+            SettingsPagePanel page = SettingsPagePanel.builder("Test", PAGE_TEXT, "header", null)
+                  .sectionsExpandedByDefault(false)
+                  .literalSection("Alpha", null, new JLabel("First option"))
+                  .literalSection("Beta", null, new JLabel("Needle option"))
+                  .build();
+            SettingsPane pane = new SettingsPane(List.of(route), Map.of("page", () -> page),
+                NAVIGATION_TEXT);
+
+            pane.setFilterText("needle");
+
+            List<CollapsibleSectionPanel> sections = findSections(page);
+            assertFalse(sections.get(0).isExpanded());
+            assertTrue(sections.get(1).isExpanded());
+        });
+    }
+
+    @Test
+    void filterMatchingAnotherRouteLeavesCurrentPageExpansionUnchanged() throws Exception {
+        runOnEdt(() -> {
+            SettingsRoute first = new SettingsRoute("first", List.of("First"));
+            SettingsRoute second = new SettingsRoute("second", List.of("Second"));
+            SettingsPagePanel firstPage = SettingsPagePanel.builder("First", PAGE_TEXT, "header", null)
+                  .sectionsExpandedByDefault(false)
+                  .literalSection("Alpha", null, new JLabel("Alpha option"))
+                  .literalSection("Beta", null, new JLabel("Beta option"))
+                  .build();
+            SettingsPane pane = new SettingsPane(List.of(first, second), Map.of(
+                  "first", () -> firstPage,
+                "second", () -> page("Needle section", null)), NAVIGATION_TEXT);
+
+            pane.setFilterText("needle");
+
+            List<CollapsibleSectionPanel> sections = findSections(firstPage);
+            assertFalse(sections.get(0).isExpanded());
+            assertFalse(sections.get(1).isExpanded());
+        });
+        finishSearchIndexing();
+    }
+
+    @Test
+    void clearingFilterRestoresExpansionState() throws Exception {
+        runOnEdt(() -> {
+            SettingsRoute route = new SettingsRoute("page", List.of("Page"));
+            SettingsPagePanel page = SettingsPagePanel.builder("Test", PAGE_TEXT, "header", null)
+                  .sectionsExpandedByDefault(false)
+                  .literalSection("Alpha", null, new JLabel("Alpha option"))
+                  .literalSection("Beta", null, new JLabel("Needle option"))
+                  .build();
+            SettingsPane pane = new SettingsPane(List.of(route), Map.of("page", () -> page),
+                NAVIGATION_TEXT);
+
+            pane.setFilterText("needle");
+            List<CollapsibleSectionPanel> sections = findSections(page);
+            assertFalse(sections.get(0).isExpanded());
+            assertTrue(sections.get(1).isExpanded());
+
+            pane.setFilterText("");
+            assertFalse(sections.get(0).isExpanded());
+            assertFalse(sections.get(1).isExpanded());
+        });
+    }
+
+    @Test
+    void activeFilterHighlightsCurrentAndNewlySelectedPages() throws Exception {
+        runOnEdt(() -> {
+            SettingsRoute first = new SettingsRoute("first", List.of("First"));
+            SettingsRoute second = new SettingsRoute("second", List.of("Second"));
+            SettingsPane pane = new SettingsPane(List.of(first, second), Map.of(
+                  "first", () -> componentPage("Search Needle"),
+                "second", () -> componentPage("Another Needle")), NAVIGATION_TEXT);
+            pane.setSize(800, 500);
+            layoutTree(pane);
+
+            pane.setFilterText("needle");
+            SettingsContentHost host = findComponent(pane, "settingsContentHost", SettingsContentHost.class);
+            assertFalse(host.getSearchHighlightBounds().isEmpty());
+
+            assertTrue(pane.selectRoute(second));
+            layoutTree(pane);
+            assertFalse(host.getSearchHighlightBounds().isEmpty());
+        });
+    }
+
+    @Test
+    void navigatingWithActiveFilterRebindsHelpWhenHiddenControlReturns() throws Exception {
+        runOnEdt(() -> {
+            SettingsRoute first = new SettingsRoute("first", List.of("First"));
+            SettingsRoute second = new SettingsRoute("second", List.of("Second"));
+            FilterableHelpPage secondPage = new FilterableHelpPage();
+            SettingsPane pane = new SettingsPane(List.of(first, second), Map.of(
+                  "first", () -> componentPage("First option"),
+                  "second", () -> secondPage), NAVIGATION_TEXT);
+
+            pane.selectRoute(second);
+            pane.selectRoute(first);
+            pane.setFilterText("needle");
+            pane.selectRoute(second);
+
+            assertEquals("Other help", secondPage.other.getToolTipText());
+
+            pane.setFilterText("");
+
+            assertNull(secondPage.other.getToolTipText());
+        });
+    }
+
+    @Test
+    void parentRouteFallsBackToFirstDescendantPage() throws Exception {
         AtomicInteger childBuilds = new AtomicInteger();
-        Map<String, Supplier<Component>> factories = new HashMap<>();
-        factories.put("initial", () -> page("Initial", null));
-        factories.put("child", () -> {
-            childBuilds.incrementAndGet();
-            return page("Child", null);
-        });
-        SettingsPane pane = new SettingsPane(List.of(initial, parent, child), factories,
-              NAVIGATION_TEXT, "Details");
+        runOnEdt(() -> {
+            SettingsRoute initial = new SettingsRoute("initial", List.of("Initial"));
+            SettingsRoute parent = new SettingsRoute("group", List.of("Group"));
+            SettingsRoute child = new SettingsRoute("child", List.of("Group", "Child"),
+                  List.of("group", "group.child"), List.of(), true);
+            Map<String, Supplier<Component>> factories = new HashMap<>();
+            factories.put("initial", () -> page("Initial", null));
+            factories.put("child", () -> {
+                childBuilds.incrementAndGet();
+                return page("Child", null);
+            });
+            SettingsPane pane = new SettingsPane(List.of(initial, parent, child), factories,
+                NAVIGATION_TEXT);
 
-        assertTrue(pane.selectRoute(parent));
-        assertEquals(1, childBuilds.get());
+            assertTrue(pane.selectRoute(parent));
+            assertEquals(1, childBuilds.get());
+        });
     }
 
     @Test
-    void searchIndexRefreshesResultsAfterEachPage() throws Exception {
-        SettingsRoute first = new SettingsRoute("first", List.of("First"));
-        SettingsRoute second = new SettingsRoute("second", List.of("Second"));
+    void searchIndexPublishesResultsAtomically() throws Exception {
         AtomicInteger secondBuilds = new AtomicInteger();
-        SettingsPane pane = new SettingsPane(List.of(first, second), Map.of(
-              "first", () -> page("Initial", null),
-              "second", () -> {
-                  secondBuilds.incrementAndGet();
-                  return page("Needle section", null);
-              }), NAVIGATION_TEXT, "Details");
+        AtomicReference<SettingsPane> pane = new AtomicReference<>();
+        runOnEdt(() -> {
+            SettingsRoute first = new SettingsRoute("first", List.of("First"));
+            SettingsRoute second = new SettingsRoute("second", List.of("Second"));
+            pane.set(new SettingsPane(List.of(first, second), Map.of(
+                  "first", () -> page("Initial", null),
+                  "second", () -> {
+                      secondBuilds.incrementAndGet();
+                      return page("Needle section", null);
+                  }), NAVIGATION_TEXT));
+            pane.get().setFilterText("needle");
 
-        pane.setFilterText("needle");
-        flushEventQueue();
+            JLabel status = findComponent(pane.get(), "lblSettingsFilterStatus", JLabel.class);
+            JLabel searching = findComponent(pane.get(), "lblSettingsSearching", JLabel.class);
+            JTree tree = findComponent(pane.get(), "settingsNavigationTree", JTree.class);
+            assertFalse(status.isVisible());
+            assertEquals("Searching...", searching.getText());
+            assertTrue(searching.isVisible());
+            assertFalse(tree.isEnabled());
+            assertEquals(2, tree.getRowCount());
+        });
+        finishSearchIndexing();
 
-        JLabel status = findComponent(pane, "lblSettingsFilterStatus", JLabel.class);
-        assertEquals(1, secondBuilds.get());
-        assertEquals("1 matches", status.getText());
-        flushEventQueue();
+        runOnEdt(() -> {
+            JLabel status = findComponent(pane.get(), "lblSettingsFilterStatus", JLabel.class);
+            JLabel searching = findComponent(pane.get(), "lblSettingsSearching", JLabel.class);
+            JTree tree = findComponent(pane.get(), "settingsNavigationTree", JTree.class);
+            assertEquals(1, secondBuilds.get());
+            assertEquals("1 matches", status.getText());
+            assertFalse(searching.isVisible());
+            assertTrue(tree.isEnabled());
+            assertEquals(1, tree.getRowCount());
+        });
+    }
+
+    @Test
+    void pageBuildClearsStaleRouteSearchText() throws Exception {
+        runOnEdt(() -> {
+            SettingsRoute route = new SettingsRoute("page", List.of("Page"));
+            route.setSectionSearchText("Stale Search Token");
+
+            new SettingsPane(List.of(route), Map.of("page", () -> SettingsPagePanel.builder(
+                "Test", PAGE_TEXT, "header", null).build()), NAVIGATION_TEXT);
+
+            assertFalse(route.matches(SettingsRoute.normalizeSearchText("stale")));
+            assertTrue(route.matches(SettingsRoute.normalizeSearchText("header")));
+        });
     }
 
     @Test
     void clearingFilterCancelsQueuedIndexingAndLaterSearchRestartsIt() throws Exception {
-        SettingsRoute first = new SettingsRoute("first", List.of("First"));
-        SettingsRoute second = new SettingsRoute("second", List.of("Second"));
         AtomicInteger secondBuilds = new AtomicInteger();
-        SettingsPane pane = new SettingsPane(List.of(first, second), Map.of(
-              "first", () -> page("Initial", null),
-              "second", () -> {
-                  secondBuilds.incrementAndGet();
-                  return page("Needle section", null);
-              }), NAVIGATION_TEXT, "Details");
+        AtomicReference<SettingsPane> pane = new AtomicReference<>();
 
-        SwingUtilities.invokeAndWait(() -> {
-            pane.setFilterText("needle");
-            pane.setFilterText("");
+        runOnEdt(() -> {
+            SettingsRoute first = new SettingsRoute("first", List.of("First"));
+            SettingsRoute second = new SettingsRoute("second", List.of("Second"));
+            pane.set(new SettingsPane(List.of(first, second), Map.of(
+                  "first", () -> page("Initial", null),
+                  "second", () -> {
+                      secondBuilds.incrementAndGet();
+                      return page("Needle section", null);
+                  }), NAVIGATION_TEXT));
+            pane.get().setFilterText("needle");
+            pane.get().setFilterText("");
         });
         flushEventQueue();
         assertEquals(0, secondBuilds.get());
 
-        pane.setFilterText("needle");
-        flushEventQueue();
+        runOnEdt(() -> pane.get().setFilterText("needle"));
+        finishSearchIndexing();
         assertEquals(1, secondBuilds.get());
-        flushEventQueue();
     }
 
     @Test
     void failedSearchIndexFactoryCanBeRetried() throws Exception {
-        SettingsRoute first = new SettingsRoute("first", List.of("First"));
-        SettingsRoute retry = new SettingsRoute("retry", List.of("Retry"));
         AtomicInteger attempts = new AtomicInteger();
-        SettingsPane pane = new SettingsPane(List.of(first, retry), Map.of(
-              "first", () -> page("Initial", null),
-              "retry", () -> {
-                  if (attempts.getAndIncrement() == 0) {
-                      throw new IllegalStateException("First indexing attempt fails");
-                  }
-                  return page("Needle section", null);
-              }), NAVIGATION_TEXT, "Details");
-
-        pane.setFilterText("needle");
+        AtomicReference<SettingsPane> pane = new AtomicReference<>();
+        runOnEdt(() -> {
+            SettingsRoute first = new SettingsRoute("first", List.of("First"));
+            SettingsRoute retry = new SettingsRoute("retry", List.of("Retry"));
+            pane.set(new SettingsPane(List.of(first, retry), Map.of(
+                  "first", () -> page("Initial", null),
+                  "retry", () -> {
+                      if (attempts.getAndIncrement() == 0) {
+                          throw new IllegalStateException("First indexing attempt fails");
+                      }
+                      return page("Needle section", null);
+                  }), NAVIGATION_TEXT));
+            pane.get().setFilterText("needle");
+        });
         flushEventQueue();
         assertEquals(1, attempts.get());
 
-        pane.setFilterText("needle ");
-        flushEventQueue();
+        runOnEdt(() -> pane.get().setFilterText("needle "));
+        finishSearchIndexing();
 
-        JLabel status = findComponent(pane, "lblSettingsFilterStatus", JLabel.class);
-        assertEquals(2, attempts.get());
-        assertEquals("1 matches", status.getText());
-        flushEventQueue();
+        runOnEdt(() -> {
+            JLabel status = findComponent(pane.get(), "lblSettingsFilterStatus", JLabel.class);
+            assertEquals(2, attempts.get());
+            assertEquals("1 matches", status.getText());
+        });
     }
 
     private static SettingsPagePanel page(String title, String summary) {
         return SettingsPagePanel.builder("Test", PAGE_TEXT, "header", null)
               .literalSection(title, summary, new JLabel())
               .build();
+    }
+
+    private static SettingsPagePanel componentPage(String text) {
+        return SettingsPagePanel.builder("Test", PAGE_TEXT, "header", null)
+              .component(new JLabel(text))
+              .build();
+    }
+
+    private static final class FilterableHelpPage extends JPanel implements SettingsFilterable {
+        private final JLabel needle = helpLabel("Needle option", "Needle help");
+        private final JLabel other = helpLabel("Other option", "Other help");
+
+        private FilterableHelpPage() {
+            applySettingsFilter("");
+        }
+
+        @Override
+        public void applySettingsFilter(String normalizedFilter) {
+            removeAll();
+            if (normalizedFilter.isBlank() || "needle option".contains(normalizedFilter)) {
+                add(needle);
+            }
+            if (normalizedFilter.isBlank() || "other option".contains(normalizedFilter)) {
+                add(other);
+            }
+            revalidate();
+            repaint();
+        }
+
+        private static JLabel helpLabel(String text, String help) {
+            JLabel label = new JLabel(text);
+            label.setToolTipText(help);
+            return label;
+        }
     }
 
     private static List<CollapsibleSectionPanel> findSections(Container root) {
@@ -214,6 +477,15 @@ class SettingsPaneTest {
             }
         }
         return sections;
+    }
+
+    private static void layoutTree(Container root) {
+        root.doLayout();
+        for (Component child : root.getComponents()) {
+            if (child instanceof Container container) {
+                layoutTree(container);
+            }
+        }
     }
 
     private static <T extends Component> T findComponent(Container root, String name, Class<T> type) {
@@ -247,6 +519,40 @@ class SettingsPaneTest {
     }
 
     private static void flushEventQueue() throws Exception {
-        SwingUtilities.invokeAndWait(() -> { });
+        runOnEdt(() -> { });
+    }
+
+    private static void finishSearchIndexing() throws Exception {
+        flushEventQueue();
+        flushEventQueue();
+    }
+
+    private static void runOnEdt(CheckedRunnable runnable) throws Exception {
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                try {
+                    runnable.run();
+                } catch (Throwable throwable) {
+                    throw new RuntimeException(throwable);
+                }
+            });
+        } catch (InvocationTargetException exception) {
+            Throwable failure = exception.getCause();
+            if (failure instanceof RuntimeException && failure.getCause() != null) {
+                failure = failure.getCause();
+            }
+            if (failure instanceof Error error) {
+                throw error;
+            }
+            if (failure instanceof Exception checkedException) {
+                throw checkedException;
+            }
+            throw exception;
+        }
+    }
+
+    @FunctionalInterface
+    private interface CheckedRunnable {
+        void run() throws Exception;
     }
 }

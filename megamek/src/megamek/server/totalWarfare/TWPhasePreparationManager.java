@@ -33,7 +33,9 @@
 
 package megamek.server.totalWarfare;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.Vector;
 import java.util.stream.Collectors;
@@ -69,8 +71,11 @@ public record TWPhasePreparationManager(TWGameManager gameManager) {
                 mapSettings.setNullBoards(TWGameManager.DEFAULT_BOARD);
                 gameManager.send(gameManager.createMapSettingsPacket());
                 gameManager.send(gameManager.createMapSizesPacket());
+                endPauseForLobby();
                 gameManager.checkForObservers();
+                clearPlayersDoneForLobby();
                 gameManager.transmitAllPlayerUpdates();
+                clearTurnsForLobby();
                 break;
             case INITIATIVE:
                 // remove the last traces of last round
@@ -114,6 +119,28 @@ public record TWPhasePreparationManager(TWGameManager gameManager) {
                 LOGGER.info("Round {} memory usage: {}",
                       gameManager.getGame().getRoundCount(),
                       MegaMek.getMemoryUsed());
+                break;
+            case VICTORY_SETUP:
+                gameManager.checkForObservers();
+                gameManager.transmitAllPlayerUpdates();
+                gameManager.resetActivePlayersDone();
+                gameManager.setIneligible(phase);
+
+                if (gameManager.getGame().getBoard().isGround()) {
+                    List<GameTurn> victorySetupTurns = new ArrayList<>();
+                    for (Player player : gameManager.getGame().getPlayersList()) {
+                        // a game master with no units of their own is an observer, but still authors the mission
+                        boolean canPlaceObjectives = (!player.isObserver() || player.isGameMaster())
+                              && !player.isGhost();
+                        if (canPlaceObjectives) {
+                            victorySetupTurns.add(new GameTurn(player.getId()));
+                        }
+                    }
+                    gameManager.getGame().setTurnVector(victorySetupTurns);
+                }
+
+                gameManager.getGame().resetTurnIndex();
+                gameManager.sendCurrentTurns();
                 break;
             case DEPLOY_MINEFIELDS:
                 gameManager.checkForObservers();
@@ -188,6 +215,21 @@ public record TWPhasePreparationManager(TWGameManager gameManager) {
                     collapsePreEndPlayerWideTurns();
                 }
                 gameManager.determineTurnOrder(phase);
+                InfantryActionTurnOrder.logUnitsHeldInPlace(gameManager.getGame(), phase);
+                if (phase.isPreEndDeclarations()) {
+                    // The book asks the attacker first and the defender answers; initiative alone may not. The
+                    // clients already hold the initiative order from determineTurnOrder, so a change is sent again
+                    // or they would wait on the wrong player.
+                    boolean reordered = InfantryActionTurnOrder.putAttackersFirst(gameManager.getGame());
+                    if (reordered) {
+                        gameManager.sendTurnList();
+                    }
+                }
+                if (phase.isDeployment()) {
+                    // "my units never got a deployment turn" has several causes that look identical on the map, and
+                    // none of them say anything; this is what tells them apart
+                    DeploymentDiagnostics.logWhoCanDeploy(gameManager.getGame());
+                }
                 // Guard the eligibility scan behind the level check so it only runs when [PreEnd] tracing is enabled.
                 if (phase.isPreEndDeclarations() && LOGGER.isDebugEnabled()) {
                     LOGGER.debug("[PreEnd] turn order built: {} turn(s); eligible units: [{}]",
@@ -220,11 +262,13 @@ public record TWPhasePreparationManager(TWGameManager gameManager) {
                 gameManager.checkLayExplosives();
                 gameManager.checkBuildBridges();
                 gameManager.checkClearRubble();
+                gameManager.checkCraneOperations();
                 gameManager.checkDeployBridges();
                 gameManager.resolveInfantryActions();
                 gameManager.resolveHarJelRepairs();
                 gameManager.resolveEmergencyCoolantSystem();
                 gameManager.checkForSuffocation();
+                gameManager.checkTaintedAtmosphereEffects();
                 gameManager.getGame().getPlanetaryConditions().determineWind();
                 gameManager.send(gameManager.getPacketHelper().createPlanetaryConditionsPacket());
 
@@ -262,6 +306,8 @@ public record TWPhasePreparationManager(TWGameManager gameManager) {
                 gameManager.autoSave();
                 // We need to send out player updates so everyone knows what their initiative is!
                 gameManager.transmitAllPlayerUpdates();
+                // Player updates carry only the order within each team; the team rolls decide who won.
+                gameManager.sendTeamInitiative();
             case TARGETING_REPORT:
             case MOVEMENT_REPORT:
             case OFFBOARD_REPORT:
@@ -347,6 +393,50 @@ public record TWPhasePreparationManager(TWGameManager gameManager) {
             default:
                 break;
         }
+    }
+
+    /**
+     * Ends any pause as the game returns to the lobby, so the lobby acts on Done presses and unit changes again. See
+     * {@link Server#endPauseForLobby()}.
+     */
+    private void endPauseForLobby() {
+        Server server = Server.getServerInstance();
+        if (server == null) {
+            LOGGER.debug("[LobbyReset] entering the lobby: no server instance, so no pause to end");
+            return;
+        }
+        server.endPauseForLobby();
+    }
+
+    /**
+     * Marks every player not done as the game returns to the lobby. The usual reset of the Done flags is skipped in
+     * report phases, which are exactly where a game is usually reset from, so without this every player arrived in the
+     * lobby already marked done. The flags reach the clients with the player updates sent next.
+     */
+    private void clearPlayersDoneForLobby() {
+        int playersMarkedDone = 0;
+        for (Player player : gameManager.getGame().getPlayersList()) {
+            if (player.isDone()) {
+                playersMarkedDone++;
+            }
+            player.setDone(false);
+        }
+        LOGGER.debug("[LobbyReset] entering the lobby: cleared the Done flag of {} player(s)", playersMarkedDone);
+    }
+
+    /**
+     * Empties the turn list and sends the empty list to every client as the game returns to the lobby. Report phases
+     * send no turn list, so after a reset from one of them each client still held the last turn of the old game, often
+     * another player's. The lobby's Done button only acts when no turn is pending or the pending turn is the player's
+     * own, so it silently did nothing until that client reconnected.
+     */
+    private void clearTurnsForLobby() {
+        int leftoverTurns = gameManager.getGame().getTurnsList().size();
+        gameManager.getGame().setTurnVector(new ArrayList<>());
+        gameManager.getGame().resetTurnIndex();
+        gameManager.sendCurrentTurns();
+        LOGGER.debug("[LobbyReset] entering the lobby: cleared {} leftover turn(s) and sent the empty turn list",
+              leftoverTurns);
     }
 
     /**

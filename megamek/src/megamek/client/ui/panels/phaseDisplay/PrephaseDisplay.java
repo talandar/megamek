@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2022-2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -47,6 +47,7 @@ import java.util.Set;
 import javax.swing.event.ListSelectionEvent;
 import javax.swing.event.ListSelectionListener;
 
+import jakarta.annotation.Nullable;
 import megamek.client.Client;
 import megamek.client.event.BoardViewEvent;
 import megamek.client.ui.Messages;
@@ -60,7 +61,6 @@ import megamek.client.ui.util.MegaMekController;
 import megamek.client.ui.widget.MegaMekButton;
 import megamek.client.ui.widget.MekPanelTabStrip;
 import megamek.common.actions.GhostTargetAction;
-import megamek.common.annotations.Nullable;
 import megamek.common.board.Coords;
 import megamek.common.enums.GamePhase;
 import megamek.common.equipment.MiscMounted;
@@ -253,14 +253,14 @@ public class PrephaseDisplay extends StatusBarPhaseDisplay implements ListSelect
 
             // If the selected entity is not on the board, use the next one.
             // ASSUMPTION: there will always be *at least one* entity on map.
-            if (null == currentEntity().getPosition()) {
+            if (currentEntity().getPosition() == null) {
 
                 // Walk through the list of entities for this player.
                 for (int nextId = client.getNextEntityNum(en); nextId != en; nextId = client.getNextEntityNum(nextId)) {
 
                     Entity nextEntity = client.getEntity(nextId);
 
-                    if (nextEntity != null && null != nextEntity.getPosition()) {
+                    if (nextEntity != null && nextEntity.getPosition() != null) {
                         cen = nextId;
                         break;
                     }
@@ -268,7 +268,7 @@ public class PrephaseDisplay extends StatusBarPhaseDisplay implements ListSelect
                 } // Check the player's next entity.
 
                 // We were *supposed* to have found an on-board entity.
-                if (null == currentEntity().getPosition()) {
+                if (currentEntity().getPosition() == null) {
                     logger.error("Could not find an on-board entity: {}", en);
                     return;
                 }
@@ -358,6 +358,8 @@ public class PrephaseDisplay extends StatusBarPhaseDisplay implements ListSelect
             endMyTurn();
             return;
         }
+        // only ring once it is clear the turn needs the player; an auto-completed turn above stays silent
+        clientgui.bingMyTurn();
 
         if (GUIP.getAutoSelectNextUnit()) {
             selectEntity(firstEntity);
@@ -369,12 +371,14 @@ public class PrephaseDisplay extends StatusBarPhaseDisplay implements ListSelect
 
         setupButtonPanel();
         refreshButtons();
+        startTimer();
     }
 
     /**
      * Does end turn stuff.
      */
     private void endMyTurn() {
+        stopTimer();
         cen = Entity.NONE;
         ghostTargetMode = false;
         ghostTargetConfirmation = null;
@@ -486,6 +490,7 @@ public class PrephaseDisplay extends StatusBarPhaseDisplay implements ListSelect
         if (game().getPhase().isSimultaneous(game())
               && (e.getPreviousPlayerId() != clientgui.getClient().getLocalPlayerNumber())
               && (game().getTurnIndex() != 0)) {
+            setStatusBarText(getRemainingPlayerWithTurns());
             return;
         }
 
@@ -506,7 +511,7 @@ public class PrephaseDisplay extends StatusBarPhaseDisplay implements ListSelect
                           "PrephaseDisplay.its_others_turn",
                           phase.toString(), e.getPlayer().getName()));
                 }
-
+                clientgui.bingOthersTurn();
             }
         }
     }

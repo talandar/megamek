@@ -34,6 +34,7 @@ package megamek.client.ratgenerator;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -108,6 +109,13 @@ public class ForceNode extends RulesetNode {
                         }
                         break;
                     case "unitType":
+                        if (fd.isInfantryClassApplied()) {
+                            // The player asked for one kind of conventional infantry, so the rule that turns some
+                            // infantry companies into battle armor does not apply.
+                            logger.debug("[ForceGen][InfantryClass] {} (faction={}): unit type roll skipped; {}"
+                                  + " infantry requested", echelonName, fd.getFaction(), fd.getInfantryClass());
+                            break;
+                        }
                         if (fd.getUnitType() == null
                               || rule.predicates.containsKey("ifUnitType")) {
                             valueNode = rule.selectOption(fd, true);
@@ -138,6 +146,12 @@ public class ForceNode extends RulesetNode {
                         }
                         break;
                     case "motive":
+                        if (fd.isInfantryClassApplied()) {
+                            // The requested class already decides how the platoons move.
+                            logger.debug("[ForceGen][InfantryClass] {} (faction={}): motive roll skipped; {}"
+                                  + " infantry requested", echelonName, fd.getFaction(), fd.getInfantryClass());
+                            break;
+                        }
                         valueNode = rule.selectOption(fd, true);
                         if (valueNode == null) {
                             break;
@@ -159,8 +173,11 @@ public class ForceNode extends RulesetNode {
                         }
                         break;
                     case "formation":
-                        if (null == fd.getFormation()
+                        if (fd.getFormation() == null
                               || rule.predicates.containsKey("ifFormation")) {
+                            // What the rule offered, captured before the pick applies its result and changes the
+                            // properties the predicates were judged against.
+                            fd.setEligibleFormations(offeredFormations(rule, fd));
                             valueNode = rule.selectOption(fd, true);
                             if (valueNode == null) {
                                 break;
@@ -168,7 +185,7 @@ public class ForceNode extends RulesetNode {
                             content = valueNode.getContent();
                             if (content != null) {
                                 FormationType ft = FormationType.getFormationType(content);
-                                if (null == ft) {
+                                if (ft == null) {
                                     logger.error("Could not parse formation type {}", content);
                                 }
                                 fd.setFormationType(ft);
@@ -275,6 +292,9 @@ public class ForceNode extends RulesetNode {
                     ArrayList<ForceDescriptor> subs = n.generateSubForces(fd, true);
                     if (subs != null) {
                         for (ForceDescriptor sub : subs) {
+                            // Attached support (field guns, artillery, engineers) keeps its own picks: the
+                            // infantry class the player asked for covers the line platoons only.
+                            sub.setInfantryClass(null);
                             fd.addAttached(sub);
                         }
                     }
@@ -386,6 +406,28 @@ public class ForceNode extends RulesetNode {
         return echelonName;
     }
 
+    /**
+     * The formation types a rule is offering this node, mapped to the weight the ruleset gave each.
+     *
+     * <p>Options carrying the same formation name have their weights merged, so the result reads as one entry per
+     * formation with the odds the ruleset actually assigns it.</p>
+     *
+     * @param rule the formation property rule about to be applied
+     * @param fd   the node the rule is being applied to
+     *
+     * @return the offered formations and their weights, in the order the ruleset declares them
+     */
+    private static Map<String, Integer> offeredFormations(OptionGroupNode rule, ForceDescriptor fd) {
+        Map<String, Integer> offered = new LinkedHashMap<>();
+        for (ValueNode option : rule.matchingOptions(fd)) {
+            String formationName = option.getContent();
+            if ((formationName != null) && !formationName.isBlank()) {
+                offered.merge(formationName.trim(), option.getWeight(), Integer::sum);
+            }
+        }
+        return offered;
+    }
+
     public static ForceNode createFromXml(Node node) {
         ForceNode retVal = new ForceNode();
         retVal.loadFromXml(node);
@@ -474,7 +516,7 @@ public class ForceNode extends RulesetNode {
      * @return A description of the node
      */
     public String show() {
-        if (null == desc) {
+        if (desc == null) {
             desc = "Force Node [echelon:" + echelon + " predicates:"
                   + predicates.entrySet().stream().map(e -> e.getKey() + "=" + e.getValue())
                   .collect(Collectors.joining(","))

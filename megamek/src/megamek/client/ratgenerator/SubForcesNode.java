@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2016-2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MegaMek.
  *
@@ -33,7 +33,9 @@
 package megamek.client.ratgenerator;
 
 import java.util.ArrayList;
+import java.util.List;
 
+import jakarta.annotation.Nullable;
 import megamek.codeUtilities.MathUtility;
 import megamek.logging.MMLogger;
 import org.w3c.dom.Node;
@@ -94,8 +96,9 @@ public class SubForcesNode extends RulesetNode {
 
                 }
                 retVal.addAll(subs);
-                if (!isAttached && null == forceDescriptor.getGenerationRule()) {
-                    forceDescriptor.setGenerationRule(findGenerateProperty(valueNode, this));
+                if (!isAttached) {
+                    applyGenerationRule(forceDescriptor, subs,
+                          findGenerateProperty(valueNode, this));
                 }
             }
         }
@@ -148,8 +151,9 @@ public class SubForcesNode extends RulesetNode {
 
                     }
                     retVal.addAll(subs);
-                    if (!isAttached && null == forceDescriptor.getGenerationRule()) {
-                        forceDescriptor.setGenerationRule(findGenerateProperty(valueNode, optionGroup, this));
+                    if (!isAttached) {
+                        applyGenerationRule(forceDescriptor, subs,
+                              findGenerateProperty(valueNode, optionGroup, this));
                     }
                 }
             }
@@ -177,6 +181,38 @@ public class SubForcesNode extends RulesetNode {
     }
 
     /**
+     * Records the {@code generate} rule this block declares.
+     *
+     * <p>The rule is written onto the children this block produced, not onto the force node, because a
+     * node may hold several {@code <subforces>} blocks and each is entitled to its own. Storing it once
+     * per node meant only the first matching block was ever honoured and every later block's rule was
+     * discarded silently - so a Level II generated its Meks as a group and quietly ignored the
+     * aerospace pair's request to share a model.</p>
+     *
+     * <p>The node's own rule is still set from the first block that declares one, which is what the
+     * formation path reads and what a node with a single block has always used.</p>
+     *
+     * @param forceDescriptor the node the block belongs to
+     * @param subs            the children this block produced
+     * @param rule            the block's {@code generate} value, or {@code null} if it declares none
+     */
+    private void applyGenerationRule(ForceDescriptor forceDescriptor, List<ForceDescriptor> subs,
+          @Nullable String rule) {
+        if (rule == null) {
+            return;
+        }
+        for (ForceDescriptor sub : subs) {
+            sub.setGenerationRule(rule);
+            sub.setBlockGenerationRule(rule);
+        }
+        LOGGER.debug("[ForceGen][GenRule] block of {} child(ren) under '{}' generates by '{}'",
+              subs.size(), forceDescriptor.getName(), rule);
+        if (forceDescriptor.getGenerationRule() == null){
+            forceDescriptor.setGenerationRule(rule);
+        }
+    }
+
+    /**
      * Used to check the element hierarchy looking for a node with a "generate" assertion set.
      *
      * @param nodes A series of ruleset nodes, sorted from the innermost to the outermost.
@@ -186,7 +222,7 @@ public class SubForcesNode extends RulesetNode {
     private String findGenerateProperty(RulesetNode... nodes) {
         for (RulesetNode n : nodes) {
             final String prop = n.assertions.getProperty("generate");
-            if (null != prop) {
+            if (prop != null) {
                 return prop;
             }
         }

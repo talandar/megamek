@@ -41,8 +41,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
+import jakarta.annotation.Nullable;
 import megamek.common.CriticalSlot;
-import megamek.common.annotations.Nullable;
 import megamek.common.bays.Bay;
 import megamek.common.bays.CrewQuartersCargoBay;
 import megamek.common.bays.FirstClassQuartersCargoBay;
@@ -172,7 +172,7 @@ public class TestAero extends TestEntity {
             }
             for (Bay bay : aero.getTransportBays()) {
                 Quarters q = getQuartersForBay(bay);
-                if (null != q) {
+                if (q != null) {
                     sizes.merge(q, (int) bay.getCapacity(), Integer::sum);
                 }
             }
@@ -512,7 +512,7 @@ public class TestAero extends TestEntity {
         // Conventional fighters with fusion engines require extra shielding.
         // Per TacOps fission engines require extra shielding as well.
         if (getEntity().hasETypeFlag(Entity.ETYPE_CONV_FIGHTER)
-              && (null != getEntity().getEngine())
+            && (getEntity().getEngine() != null)
               && (getEntity().getEngine().isFusion() || getEntity().getEngine().hasFlag(Engine.FISSION))) {
             wt = ceil(wt * 1.5, Ceil.HALF_TON);
         }
@@ -839,6 +839,25 @@ public class TestAero extends TestEntity {
             correct = true;
         }
         return correct;
+    }
+
+    /**
+     * Check if the unit has combinations of equipment which are not allowed in the construction rules.
+     *
+     * @param buff diagnostics are appended to this
+     *
+     * @return true if the entity is illegal
+     */
+    @Override
+    public boolean hasIllegalEquipmentCombinations(StringBuffer buff) {
+        boolean illegal = super.hasIllegalEquipmentCombinations(buff);
+
+        if (aero.countWorkingMisc(MiscType.F_FLOTATION_HULL) > 1) {
+            illegal = true;
+            buff.append("Max of 1 flotation hull chassis mod\n");
+        }
+
+        return illegal;
     }
 
     /**
@@ -1332,12 +1351,27 @@ public class TestAero extends TestEntity {
     }
 
     /**
-     * One gunner is required for each capital weapon and each six standard scale weapons, rounding up
-     *
-     * @return The vessel's minimum gunner requirements.
+     * Returns the number of required gunners of the entity.
+     * @param aero The entity
+     * @return The number of required gunners
      */
     public static int requiredGunners(Aero aero) {
         return Compute.getTotalGunnerNeeds(aero);
+    }
+
+    /**
+     * Returns the number of required officers of the entity.
+     * @param aero The entity
+     * @return The number of required officers
+     */
+    public static int requiredOfficers(Aero aero) {
+        if (aero.hasETypeFlag(Entity.ETYPE_SMALL_CRAFT)) {
+            return TestSmallCraft.requiredOfficers((SmallCraft) aero);
+        } else if (aero.hasETypeFlag(Entity.ETYPE_JUMPSHIP)) {
+            return TestAdvancedAerospace.requiredOfficers((Jumpship) aero);
+        } else {
+            return 0;
+        }
     }
 
     /**

@@ -44,31 +44,41 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.StringTokenizer;
 import java.util.Vector;
+import java.util.function.BiConsumer;
+import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JComponent;
 import javax.swing.JMenu;
 import javax.swing.JMenuItem;
-import javax.swing.JOptionPane;
 import javax.swing.JPopupMenu;
 import javax.swing.JSeparator;
 import javax.swing.UIManager;
 
+import jakarta.annotation.Nullable;
 import megamek.client.Client;
 import megamek.client.bot.princess.ArtilleryCommandAndControl.ArtilleryOrder;
 import megamek.client.bot.princess.ArtilleryCommandAndControl.SpecialAmmo;
-import megamek.client.bot.princess.CardinalEdge;
 import megamek.client.bot.princess.ChatCommands;
 import megamek.client.event.BoardViewEvent;
 import megamek.client.ui.Messages;
+import megamek.client.ui.clientGUI.boardview.BoardView;
 import megamek.client.ui.clientGUI.boardview.overlay.ToastLevel;
-import megamek.client.ui.dialogs.ClientCommandDialog;
+import megamek.client.ui.dialogs.BotCommands.BotMoveOrderDialog;
+import megamek.client.ui.dialogs.BotCommands.BotOrderFacingDialog;
+import megamek.client.ui.dialogs.BotCommands.BotOrdersMenuBuilder;
+import megamek.client.ui.dialogs.BotCommands.BotWaypointMenuBuilder;
+import megamek.client.ui.dialogs.BuildingEditDialog;
+import megamek.client.ui.dialogs.HexEditDialog;
 import megamek.client.ui.dialogs.NoteDialog;
 import megamek.client.ui.dialogs.TurretFacingDialog;
 import megamek.client.ui.dialogs.UnitEditorDialog;
 import megamek.client.ui.entityreadout.LiveReadoutDialog;
+import megamek.client.ui.enums.DialogResult;
 import megamek.client.ui.panels.phaseDisplay.FiringDisplay;
 import megamek.client.ui.panels.phaseDisplay.MovementDisplay;
 import megamek.client.ui.panels.phaseDisplay.PhysicalDisplay;
+import megamek.client.ui.panels.phaseDisplay.PreEndDeclarationsDisplay;
 import megamek.client.ui.panels.phaseDisplay.TargetingPhaseDisplay;
+import megamek.client.ui.panels.phaseDisplay.VictoryHexPropertiesPane;
 import megamek.client.ui.panels.phaseDisplay.commands.MoveCommand;
 import megamek.common.Hex;
 import megamek.common.HexTarget;
@@ -79,27 +89,18 @@ import megamek.common.actions.BAVibroClawAttackAction;
 import megamek.common.actions.BreakGrappleAttackAction;
 import megamek.common.actions.GrappleAttackAction;
 import megamek.common.actions.WeaponAttackAction;
-import megamek.common.annotations.Nullable;
 import megamek.common.board.Board;
 import megamek.common.board.BoardLocation;
 import megamek.common.board.Coords;
 import megamek.common.comparators.WeaponComparatorDamage;
 import megamek.common.compute.TurretFacing;
-import megamek.common.equipment.AmmoType;
-import megamek.common.equipment.EquipmentFlag;
-import megamek.common.equipment.EquipmentMode;
-import megamek.common.equipment.MinefieldTarget;
-import megamek.common.equipment.MiscMounted;
-import megamek.common.equipment.MiscType;
-import megamek.common.equipment.Mounted;
-import megamek.common.equipment.WeaponMounted;
-import megamek.common.equipment.WeaponType;
+import megamek.common.equipment.*;
 import megamek.common.game.Game;
 import megamek.common.options.OptionsConstants;
+import megamek.common.orders.OrderEligibility;
 import megamek.common.rolls.TargetRoll;
 import megamek.common.units.*;
 import megamek.logging.MMLogger;
-import megamek.server.commands.*;
 
 /**
  * Context menu for the board.
@@ -166,18 +167,22 @@ public class MapMenu extends JPopupMenu {
                     if (getComponentCount() > 0) {
                         addSeparator();
                     }
-                    addIfNotEmpty(createMovementMenu(myEntity.getPosition().equals(coords)));
+                    if (myEntity.getPosition() != null) {
+                        addIfNotEmpty(createMovementMenu(myEntity.getPosition().equals(coords)));
+                    } else {
+                        addIfNotEmpty(createMovementMenu(false));
+                    }
                     addIfNotEmpty(createTurnMenu());
                     addIfNotEmpty(createStandMenu());
                     addIfNotEmpty(createConvertMenu());
                     addIfNotEmpty(createPhysicalMenu(true));
                     removeSeparatorIfLast();
 
-                } else if ((currentPanel instanceof FiringDisplay)) {
+                } else if ((currentPanel instanceof FiringDisplay firingDisplay)) {
                     if (getComponentCount() > 0) {
                         addSeparator();
                     }
-                    addIfNotEmpty(createWeaponsFireMenu());
+                    addIfNotEmpty(createWeaponsFireMenu(firingDisplay));
                     addIfNotEmpty(createModeMenu());
                     addIfNotEmpty(createTorsoTwistMenu());
                     addIfNotEmpty(createRotateTurretMenu());
@@ -200,6 +205,7 @@ public class MapMenu extends JPopupMenu {
 
         addIfNotEmpty(touchOffExplosivesMenu());
         addIfNotEmptyWithSeparator(createSpecialHexDisplayMenu());
+        addWaypointMenus();
         addIfNotEmptyWithSeparator(createPleaToRoyaltyMenu());
         addIfNotEmptyWithSeparator(createGameMasterMenu());
         return getComponentCount() > 0;
@@ -298,6 +304,8 @@ public class MapMenu extends JPopupMenu {
                         ((FiringDisplay) currentPanel).selectEntity(selectedEntity.getId());
                     } else if (currentPanel instanceof PhysicalDisplay) {
                         ((PhysicalDisplay) currentPanel).selectEntity(selectedEntity.getId());
+                    } else if (currentPanel instanceof PreEndDeclarationsDisplay preEndDisplay) {
+                        preEndDisplay.selectEntity(selectedEntity.getId());
                     }
                 }
             } catch (Exception ex) {
@@ -405,6 +413,38 @@ public class MapMenu extends JPopupMenu {
     }
 
     /**
+     * Adds a menu for each bot route on the player's side with a waypoint on this hex, to change the waypoint's facing
+     * and hold, remove it, or open the route in the Move Order editor.
+     */
+    private void addWaypointMenus() {
+        boolean isFirst = true;
+        for (JMenu waypointMenu : BotWaypointMenuBuilder.menusFor(client, coords, boardLocation.boardId(),
+              this::openBotRouteEditor, (botPlayer, orderText) -> gui.addToast(ToastLevel.SUCCESS,
+                    Messages.getString("BotCommandPanel.toast.orderSent", botPlayer.getName(), orderText)))) {
+            if (isFirst && (getComponentCount() > 0)) {
+                addSeparator();
+            }
+            add(waypointMenu);
+            isFirst = false;
+        }
+    }
+
+    /**
+     * Opens the Move Order editor for the units following a route, on this board.
+     */
+    private void openBotRouteEditor(Player botPlayer, BotOrdersMenuBuilder.OrderGroup group) {
+        if (!(gui.getBoardView(boardLocation.boardId()) instanceof BoardView boardView)) {
+            return;
+        }
+        BotOrdersMenuBuilder unitsSource = new BotOrdersMenuBuilder(client, (orderDescription, singleHex,
+              onPicked) -> {}, (orderedBot, orderText) -> {});
+        new BotMoveOrderDialog(gui, boardView, botPlayer, group, () -> unitsSource.unitsByLance(botPlayer),
+              (orderedBot, orderText) -> gui.addToast(ToastLevel.SUCCESS,
+                    Messages.getString("BotCommandPanel.toast.orderSent", orderedBot.getName(), orderText)))
+              .setVisible(true);
+    }
+
+    /**
      * Creates various menus related to giving commands to allied bots
      *
      * @return JMenu
@@ -427,12 +467,23 @@ public class MapMenu extends JPopupMenu {
 
         JMenu prioritizeTargetUnitMenu = new JMenu(Messages.getString("Bot.commands.priority"));
         JMenu ignoreTargetMenu = new JMenu(Messages.getString("Bot.commands.ignore"));
-        JMenu fleeMenu = createFleeMenu(bot);
         JMenu behaviorMenu = createBehaviorMenu(bot);
+
+        // the same orders as the Bot Commands panel's Orders button, with this hex as the route; CASPAR bots only
+        if (OrderEligibility.takesUnitOrders(client.getGame(), bot)) {
+            JMenu ordersMenu = new JMenu(Messages.getString("BotCommandPanel.Orders.title"));
+            new BotOrdersMenuBuilder(client, (orderDescription, singleHex, onPicked) -> onPicked.accept(
+                  coords.getBoardNum()), (botPlayer, orderText) -> gui.addToast(ToastLevel.SUCCESS,
+                  Messages.getString("BotCommandPanel.toast.orderSent", botPlayer.getName(), orderText)))
+                  .withFacingChooser(this::chooseBotOrderFacings)
+                  .populate(ordersMenu, bot, coords);
+            if (ordersMenu.getItemCount() > 0) {
+                menu.add(ordersMenu);
+            }
+        }
 
         JMenu targetHexMenu = createTargetHexMenuItem(bot);
         menu.add(targetHexMenu);
-        menu.add(createWaypointMenu(bot));
         if (botHasArtillery(bot)) {
             menu.add(createArtilleryMenu(bot));
         }
@@ -451,30 +502,7 @@ public class MapMenu extends JPopupMenu {
 
         menu.addSeparator();
         menu.add(behaviorMenu);
-        menu.add(fleeMenu);
-        menu.add(createHoldPositionMenuItem(bot, true));
-        menu.add(createHoldPositionMenuItem(bot, false));
         return menu;
-    }
-
-    /**
-     * Creates a menu item ordering the given bot to hold position or to resume movement.
-     *
-     * @param bot  The bot player to send the order to
-     * @param hold {@code true} for a hold position order, {@code false} to resume movement
-     *
-     * @return The created menu item
-     */
-    private JMenuItem createHoldPositionMenuItem(Player bot, boolean hold) {
-        String messageKey = hold ? "Bot.commands.holdPosition" : "Bot.commands.resumeMovement";
-        JMenuItem item = new JMenuItem(Messages.getString(messageKey));
-        item.addActionListener(evt -> {
-            client.sendChat(String.format("%s: %s : %s",
-                  bot.getName(), ChatCommands.HOLD_POSITION.getCommand(), hold));
-            gui.addToast(ToastLevel.SUCCESS, Messages.getString("BotCommandPanel.toast.orderSent",
-                  bot.getName(), Messages.getString(messageKey)));
-        });
-        return item;
     }
 
     JMenu createBehaviorMenu(Player bot) {
@@ -482,7 +510,7 @@ public class MapMenu extends JPopupMenu {
         menu.add(createCautionMenu(bot));
         menu.add(createAvoidMenu(bot));
         menu.add(createAggressionMenu(bot));
-        menu.add(createHerdingMenu(bot));
+        menu.add(createMutualSupportMenu(bot));
         menu.add(createBraveryMenu(bot));
         return menu;
     }
@@ -510,8 +538,8 @@ public class MapMenu extends JPopupMenu {
         return menu;
     }
 
-    JMenu createHerdingMenu(Player bot) {
-        return createBehaviorAdjustmentMenu(bot, "Bot.commands.herding", ChatCommands.HERDING);
+    JMenu createMutualSupportMenu(Player bot) {
+        return createBehaviorAdjustmentMenu(bot, "Bot.commands.mutualSupport", ChatCommands.MUTUAL_SUPPORT);
     }
 
     JMenu createBraveryMenu(Player bot) {
@@ -530,35 +558,20 @@ public class MapMenu extends JPopupMenu {
         return createBehaviorAdjustmentMenu(bot, "Bot.commands.caution", ChatCommands.CAUTION);
     }
 
-    JMenu createFleeMenu(Player bot) {
-        JMenu menu = new JMenu(Messages.getString("Bot.commands.flee"));
-        menu.add(setFleeAction(new JMenuItem(Messages.getString("BotConfigDialog.northEdge")),
-              bot,
-              CardinalEdge.NORTH));
-        menu.add(setFleeAction(new JMenuItem(Messages.getString("BotConfigDialog.southEdge")),
-              bot,
-              CardinalEdge.SOUTH));
-        menu.add(setFleeAction(new JMenuItem(Messages.getString("BotConfigDialog.westEdge")), bot, CardinalEdge.WEST));
-        menu.add(setFleeAction(new JMenuItem(Messages.getString("BotConfigDialog.eastEdge")), bot, CardinalEdge.EAST));
-        menu.add(setFleeAction(new JMenuItem(Messages.getString("BotConfigDialog.nearestEdge")),
-              bot,
-              CardinalEdge.NEAREST));
-        return menu;
-    }
-
-    private JMenuItem setFleeAction(JMenuItem fleeMenuItem, Player bot, CardinalEdge cardinalEdge) {
-        fleeMenuItem.addActionListener(evt -> {
-            int confirm = JOptionPane.showConfirmDialog(gui.getFrame(),
-                  Messages.getString("Bot.commands.flee.confirmation", bot.getName()),
-                  Messages.getString("Bot.commands.flee.confirm"),
-                  JOptionPane.YES_NO_OPTION);
-
-            if (confirm == JOptionPane.YES_OPTION) {
-                client.sendChat(String.format("%s: fl : %d", bot.getName(), cardinalEdge.getIndex()));
-            }
-        });
-
-        return fleeMenuItem;
+    /**
+     * Opens the facing dialog for a bot order, showing the first unit of the group.
+     */
+    private void chooseBotOrderFacings(BotOrdersMenuBuilder.OrderGroup group, int facingWhileMoving,
+          int facingWhenStopped, BiConsumer<Integer, Integer> onChosen) {
+        Entity previewUnit = client.getGame().getEntity(group.unitIds().get(0));
+        if (previewUnit == null) {
+            return;
+        }
+        BotOrderFacingDialog dialog = new BotOrderFacingDialog(gui.getFrame(), gui, previewUnit, facingWhileMoving,
+              facingWhenStopped);
+        if (dialog.showDialog() == DialogResult.CONFIRMED) {
+            onChosen.accept(dialog.getFacingWhileMoving(), dialog.getFacingWhenStopped());
+        }
     }
 
     JMenuItem createIgnoreTargetUnitMenu(Player bot, Entity entity) {
@@ -571,52 +584,6 @@ public class MapMenu extends JPopupMenu {
         JMenuItem item = new JMenuItem(entity.getDisplayName());
         item.addActionListener(evt -> client.sendChat(String.format("%s: pr : %d", bot.getName(), entity.getId())));
         return item;
-    }
-
-    JMenu createWaypointMenu(Player bot) {
-        JMenu targetHexMenu = new JMenu(Messages.getString("Bot.commands.waypoint"));
-        // "Set hex" replaces the unit's waypoint list with this hex, "Add hex" appends this hex to it
-        JMenu setWaypointMenu = createWaypointCommandMenu(bot,
-              "Bot.commands.setWaypoint", ChatCommands.SET_WAYPOINT);
-        JMenu addWaypointMenu = createWaypointCommandMenu(bot,
-              "Bot.commands.addWaypoint", ChatCommands.ADD_WAYPOINT);
-
-        JMenuItem clearWaypoints = new JMenuItem(Messages.getString("Bot.commands.clearAllWaypoints"));
-        clearWaypoints.addActionListener(evt -> client.sendChat(String.format("%s: %s",
-              bot.getName(), ChatCommands.CLEAR_ALL_WAYPOINTS.getCommand())));
-
-        targetHexMenu.add(setWaypointMenu);
-        targetHexMenu.add(addWaypointMenu);
-        targetHexMenu.add(clearWaypoints);
-
-        return targetHexMenu;
-    }
-
-    /**
-     * Creates a menu listing the bot's units; selecting a unit sends the given waypoint chat command for the currently
-     * selected hex.
-     *
-     * @param bot             The bot player to send the command to
-     * @param messageKey      The resource key for the menu title
-     * @param waypointCommand The waypoint chat command to send (e.g. add-waypoint or set-waypoints)
-     *
-     * @return The created menu
-     */
-    private JMenu createWaypointCommandMenu(Player bot, String messageKey, ChatCommands waypointCommand) {
-        JMenu menu = new JMenu(Messages.getString(messageKey));
-        for (Entity entity : client.getGame().getPlayerEntities(bot, false)) {
-            JMenuItem waypoint = new JMenuItem(entity.getDisplayName());
-            waypoint.addActionListener(evt ->
-                  client.sendChat(String.format("%s: %s : %s %s",
-                        bot.getName(),
-                        waypointCommand.getCommand(),
-                        entity.getId(),
-                        coords.hexCode(board)
-                  ))
-            );
-            menu.add(waypoint);
-        }
-        return menu;
     }
 
     JMenu createTargetHexMenuItem(Player bot) {
@@ -731,9 +698,12 @@ public class MapMenu extends JPopupMenu {
             // owner change. So the map menu only opens that dialog per unit, and otherwise offers the hex and board
             // tools; the old per-unit destroy, rescue and traitor submenus have moved into the dialog.
             JMenu dmgMenu = new JMenu(Messages.getString("Gamemaster.EditDamage"));
-            JMenu specialCommandsMenu = createGMSpecialCommandsMenu();
+            JMenu specialCommandsMenu = GameMasterCommandMenu.createSpecialCommandsMenu(gui, coords);
 
-            var entities = client.getGame().getEntitiesVector(coords);
+            // Ignoring targetability is deliberate: a gamemaster edits units rather than shooting at them, and an
+            // Advanced Building reports itself untargetable because it is shot at as a hex rather than as a unit.
+            // Filtering on it left buildings out of this list entirely, which dropped the whole submenu.
+            var entities = client.getGame().getEntitiesVector(boardLocation, true);
 
             for (Entity entity : entities) {
                 dmgMenu.add(createUnitEditorMenuItem(entity));
@@ -742,37 +712,89 @@ public class MapMenu extends JPopupMenu {
                 menu.add(dmgMenu);
                 menu.addSeparator();
             }
+            // Change Terrain has a dialog of its own rather than a generated form, because what a gamemaster may
+            // legally set depends on what the hex already holds, and the generated form cannot know that.
+            menu.add(createChangeTerrainMenuItem());
+            menu.add(createBuildingMenuItem());
+            if (client.getGame().getOptions().booleanOption(OptionsConstants.VICTORY_USE_OBJECTIVES)) {
+                menu.add(createObjectiveMenuItem());
+                if (!entities.isEmpty()) {
+                    menu.add(createScanTargetMenu(entities));
+                }
+            }
             menu.add(specialCommandsMenu);
         }
         return menu;
     }
 
     /**
-     * Create a menu for special commands for the GM
-     *
-     * @return the menu
+     * Opens the control point pane on the hex that was right-clicked, to change the objective there, remove it, or
+     * put a new one there, at any time in the game. The edit goes to the server, which replaces the marker and
+     * tells every client (Objectives series, game master tools).
      */
-    private JMenu createGMSpecialCommandsMenu() {
-        JMenu menu = new JMenu(Messages.getString("Gamemaster.SpecialCommands"));
-        // Change Unit Ownership, Destroy Unit and Rescue Unit live in the Edit Damage dialog now, not here. What is
-        // left is the hex and board tools, which act on the map rather than a single unit.
-        List.of(new ChangeWeatherCommand(null, null),
-              new DisasterCommand(null, null),
-              new FirefightCommand(null, null),
-              new FirestarterCommand(null, null),
-              new FirestormCommand(null, null),
-              new NoFiresCommand(null, null),
-              new OrbitalBombardmentCommand(null, null),
-              new RemoveSmokeCommand(null, null),
-              new SkillModifierCommand(null, null)).forEach(cmd -> {
-            JMenuItem item = new JMenuItem(cmd.getLongName());
-            item.addActionListener(evt -> new ClientCommandDialog(gui.getFrame(), gui, cmd, coords).setVisible(true));
-            menu.add(item);
-        });
+    private JMenuItem createObjectiveMenuItem() {
+        ObjectiveMarker existing = objectiveAt(coords);
+        JMenuItem item = new JMenuItem(Messages.getString(
+              (existing != null) ? "Gamemaster.cmd.objective.edit" : "Gamemaster.cmd.objective.add"));
+        item.addActionListener(event -> editObjectiveAsGameMaster(existing));
+        return item;
+    }
 
+    /**
+     * Marks the units standing in the right-clicked hex as ones the mission wants scanned, or unmarks them. Ticking
+     * every vehicle of a convoy makes the convoy the scanning objective: once any unit is marked, only marked units
+     * are worth reading (Objectives series, game master tools).
+     */
+    private JMenu createScanTargetMenu(List<Entity> entities) {
+        JMenu menu = new JMenu(Messages.getString("Gamemaster.cmd.scanTarget"));
+        for (Entity entity : entities) {
+            JCheckBoxMenuItem item = new JCheckBoxMenuItem(entity.getShortName(), entity.isDesignatedScanTarget());
+            item.addActionListener(event -> client.sendScanDesignation(entity.getId(), item.isSelected()));
+            menu.add(item);
+        }
         return menu;
     }
 
+    private @Nullable ObjectiveMarker objectiveAt(Coords hex) {
+        for (ICarryable groundObject : client.getGame().getGroundObjects(hex)) {
+            if (groundObject instanceof ObjectiveMarker marker) {
+                return marker;
+            }
+        }
+        return null;
+    }
+
+    private void editObjectiveAsGameMaster(@Nullable ObjectiveMarker existing) {
+        ObjectiveMarker marker = existing;
+        if (marker == null) {
+            marker = new ObjectiveMarker();
+            marker.setName(Messages.getString("VictoryHex.name", coords.getBoardNum()));
+            marker.setOwnerId(client.getLocalPlayer().getId());
+        }
+        VictoryHexPropertiesPane.Result result = VictoryHexPropertiesPane.edit(gui.getFrame(), marker,
+              client.getGame().getPlayersList(), true);
+        switch (result) {
+            case SAVED -> client.sendObjectiveEdit(coords, marker);
+            case REMOVED -> client.sendObjectiveEdit(coords, null);
+            case CANCELLED -> { /* nothing sent; the server's copy stands */ }
+        }
+    }
+
+    /** Opens the Building dialog on the hex that was right-clicked, to put one up, change it or remove it. */
+    private JMenuItem createBuildingMenuItem() {
+        JMenuItem item = new JMenuItem(Messages.getString("Gamemaster.cmd.building.longName"));
+        item.addActionListener(event -> new BuildingEditDialog(gui.getFrame(), gui, coords).setVisible(true));
+        return item;
+    }
+
+    /** Opens the Change Terrain dialog on the hex that was right-clicked. */
+    private JMenuItem createChangeTerrainMenuItem() {
+        // named from the command rather than from the dialog's title, so this entry reads the same as the one on the
+        // Commands button and carries the same mark
+        JMenuItem item = new JMenuItem(Messages.getString("Gamemaster.cmd.changeTerrain.longName"));
+        item.addActionListener(event -> new HexEditDialog(gui.getFrame(), gui, coords).setVisible(true));
+        return item;
+    }
 
     JMenuItem createUnitEditorMenuItem(Entity entity) {
         JMenuItem item = new JMenuItem(entity.getDisplayName());
@@ -1066,7 +1088,7 @@ public class MapMenu extends JPopupMenu {
         return menu;
     }
 
-    private JMenu createWeaponsFireMenu() {
+    private JMenu createWeaponsFireMenu(FiringDisplay firingDisplay) {
         JMenu menu = new JMenu("Weapons");
 
         // Hidden entities are not allowed to shoot without being revealed
@@ -1075,7 +1097,7 @@ public class MapMenu extends JPopupMenu {
             return menu;
         }
 
-        menu.add(createFireJMenuItem());
+        menu.add(createFireJMenuItem(firingDisplay));
         menu.add(createSkipJMenuItem());
         menu.add(createAlphaStrikeJMenuItem());
 
@@ -1163,13 +1185,34 @@ public class MapMenu extends JPopupMenu {
         return item;
     }
 
-    private JMenuItem createFireJMenuItem() {
+    /**
+     * Creates the "Fire" item, which declares an attack with the weapon currently selected in the unit display.
+     * <p>
+     * The item is enabled only when {@link FiringDisplay#isFireAllowed()} is {@code true}, so that it refuses exactly
+     * what the Fire button refuses. Without that gate the menu can declare attacks the rules forbid, such as a Swarm
+     * or Leg Attack by a conventional infantry platoon that has already fired its primary weapons; the server then
+     * rejects both attacks and the platoon does nothing at all (issue #8626). As with the Fire button, the reason for
+     * a refusal is the to-hit text in the unit display.
+     *
+     * @param firingDisplay the firing phase display that owns the attack declaration and its legality gate
+     *
+     * @return the "Fire" menu item
+     */
+    private JMenuItem createFireJMenuItem(FiringDisplay firingDisplay) {
         JMenuItem item = new JMenuItem("Fire");
-        item.addActionListener(evt -> {
+
+        boolean isFireAllowed = firingDisplay.isFireAllowed();
+        item.setEnabled(isFireAllowed);
+        if (!isFireAllowed) {
+            logger.debug("[MapMenu] Fire item disabled for {}: the Fire button is not currently enabled; "
+                  + "the unit display's to-hit line states the reason", myEntity.getShortName());
+        }
+
+        item.addActionListener(event -> {
             try {
-                ((FiringDisplay) currentPanel).fire();
-            } catch (Exception ex) {
-                logger.error(ex, "");
+                firingDisplay.fire();
+            } catch (Exception exception) {
+                logger.error(exception, "");
             }
         });
 
@@ -1470,7 +1513,10 @@ public class MapMenu extends JPopupMenu {
             } else {
                 if ((hasAmmoType(AmmoType.AmmoTypeEnum.LRM)
                       || hasAmmoType(AmmoType.AmmoTypeEnum.LRM_IMP)
-                      || hasAmmoType(AmmoType.AmmoTypeEnum.MML))
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.MML)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.TBOLT_10)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.TBOLT_15)
+                      || hasAmmoType(AmmoType.AmmoTypeEnum.TBOLT_20))
                       && (hasMunitionType(AmmoType.Munitions.M_FASCAM)
                       || hasMunitionType(AmmoType.Munitions.M_THUNDER)
                       || hasMunitionType(AmmoType.Munitions.M_THUNDER_ACTIVE)
@@ -1486,6 +1532,12 @@ public class MapMenu extends JPopupMenu {
 
                 if (hasAmmoType(AmmoType.AmmoTypeEnum.BA_MICRO_BOMB)) {
                     menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_HEX_BOMB)));
+                }
+
+                if (hasWeaponFlag(WeaponType.F_MRM)
+                      && EquipmentActivation.hasActiveGuidance(myEntity, MiscType.F_APOLLO)
+                      && Game.rulesManager.getRulesWeapons().getApolloSaturationMode()) {
+                    menu.add(targetMenuItem(new HexTarget(coords, board, Targetable.TYPE_SATURATION)));
                 }
 
                 if (hasWeaponFlag(WeaponType.F_DIVE_BOMB)
@@ -1768,7 +1820,8 @@ public class MapMenu extends JPopupMenu {
         if (list.size() == 1) {
             myTarget = selectedEntity = list.firstElement();
             if (currentPanel instanceof FiringDisplay panel) {
-                panel.target(myTarget);
+                // The aim window would take focus and close this menu before it can be used (#9472)
+                panel.targetWithoutAimWindow(myTarget);
             } else if (currentPanel instanceof PhysicalDisplay) {
                 ((PhysicalDisplay) currentPanel).target(myTarget);
             } else if (currentPanel instanceof TargetingPhaseDisplay) {
@@ -1795,12 +1848,17 @@ public class MapMenu extends JPopupMenu {
     private JMenuItem createModeJMenuItem(Mounted<?> mounted, int position) {
         JMenuItem item = new JMenuItem();
 
-        EquipmentMode mode = mounted.getType().getMode(position);
+        // Read from the mount, not its type. An infantry platoon's mount combines the modes of its primary and
+        // secondary weapons, so a mount can offer modes its own type does not have: reading from the type after
+        // counting with getModesCount() walks off the end of the type's list.
+        EquipmentMode mode = mounted.getMode(position);
 
+        // The starred entry is the mode the equipment is already in, so it is described as a state; the rest
+        // are changes the player can pick, and read as instructions.
         if (mode.equals(mounted.curMode())) {
-            item.setText("* " + mode.getDisplayableName());
+            item.setText("* " + mode.getStateName(mounted.getType()));
         } else {
-            item.setText(mode.getDisplayableName());
+            item.setText(mode.getActionName(mounted.getType()));
         }
         item.setActionCommand(Integer.toString(position));
         item.addActionListener(evt -> {
