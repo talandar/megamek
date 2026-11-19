@@ -3720,10 +3720,16 @@ public class TWGameManager extends AbstractGameManager {
             game.setTurnVector(new ArrayList<>());
         } else {
             for (Entity entity : game.getEntitiesVector()) {
-                if (entity.isEligibleFor(phase)) {
-                    assistable = true;
-                } else {
+                if (!entity.isEligibleFor(phase)) {
                     assistants.addElement(entity);
+                } else if (!Game.rulesManager.getRulesGame().eligibleForPhase(entity, phase)) {
+                    // determineTurnOrder gives this unit no turn, so it must not stay selectable: a unit that can
+                    // be picked without a turn of its own spends a turn that belongs to another unit.
+                    LOGGER.info("[TurnOrder] {} gets no {} turn under the active rules system; marking it done",
+                          entity.getShortName(), phase);
+                    assistants.addElement(entity);
+                } else {
+                    assistable = true;
                 }
             }
         }
@@ -4597,6 +4603,17 @@ public class TWGameManager extends AbstractGameManager {
                       connectionId,
                       entity.getShortName());
                 // Without this the sender believes its turn is over while the server still waits on it
+                send(connectionId, packetHelper.createTurnListPacket());
+                send(connectionId, packetHelper.createTurnIndexPacket(connectionId));
+                return;
+            }
+
+            if (DeploymentServerHelper.deploysAlreadyDeployedUnit(entity, movePath)) {
+                LOGGER.error("Refused movement from connection {}: {} is already deployed at {} but the path deploys "
+                            + "it again; resending the turn so the sender can act again",
+                      connectionId,
+                      entity.getShortName(),
+                      entity.getPosition());
                 send(connectionId, packetHelper.createTurnListPacket());
                 send(connectionId, packetHelper.createTurnIndexPacket(connectionId));
                 return;
@@ -9529,7 +9546,8 @@ public class TWGameManager extends AbstractGameManager {
                 violation = faller;
                 displacementRoll = null;
             }
-            Coords displacedTo = Compute.getValidDisplacement(game, violation.getId(), fallPosition, direction);
+            Coords displacedTo = Compute.getAccidentalFallDisplacement(game, violation.getId(), fallPosition,
+                  direction);
             if (displacedTo != null) {
                 reports.addAll(doEntityDisplacement(violation, fallPosition, displacedTo, displacementRoll));
                 // Update the violating entity's position on the
@@ -9657,7 +9675,7 @@ public class TWGameManager extends AbstractGameManager {
             }
             // ok, we missed, let's fall into a valid other hex and not cause an
             // AFFA while doing so
-            Coords targetDest = Compute.getValidDisplacement(game, entity.getId(), dest, direction);
+            Coords targetDest = Compute.getAccidentalFallDisplacement(game, entity.getId(), dest, direction);
             if (targetDest != null) {
                 vPhaseReport.addAll(doEntityFallsInto(entity,
                       entitySrcElevation,

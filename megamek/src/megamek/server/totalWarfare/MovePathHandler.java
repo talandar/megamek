@@ -2425,6 +2425,9 @@ class MovePathHandler extends AbstractTWRuleHandler {
 
             // stop for illegal movement
             if (stepMoveType == EntityMovementType.MOVE_ILLEGAL) {
+                if (md.isEndStep(step)) {
+                    new HiddenFriendlyStackingHandler(gameManager).reportMoveStoppedShort(entity, step);
+                }
                 break;
             }
 
@@ -3321,6 +3324,8 @@ class MovePathHandler extends AbstractTWRuleHandler {
 
             if (step.getType() == MoveStepType.BRACE) {
                 entity.setBraceLocation(step.getBraceLocation());
+                logger.info("[Brace] {}: braced {} at {} (hull down: {})", entity.getDisplayName(),
+                      entity.getLocationName(step.getBraceLocation()), curPos, entity.isHullDown());
             }
 
             if (step.getType() == MoveStepType.SHUTDOWN) {
